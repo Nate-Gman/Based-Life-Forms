@@ -1,3 +1,17 @@
+import subprocess, sys
+
+def _ensure(pkg, pip_name=None):
+    try:
+        __import__(pkg)
+    except ImportError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", pip_name or pkg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+_ensure("numpy")
+_ensure("rdkit", "rdkit-pypi")
+
 import numpy as np
 import random
 import json
