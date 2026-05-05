@@ -8340,7 +8340,12 @@ def launch_ui():
             self._nb_widget.add(t6b, text="  🧪 Real Biology  ")
             self._build_realbio_tab(t6b)
 
-            # Tab 7: About
+            # Tab 7: Human Body — complete organism architecture
+            t7 = ttk.Frame(self._nb_widget)
+            self._nb_widget.add(t7, text="  🧍 Human Body  ")
+            self._build_human_body_tab(t7)
+
+            # Tab 8: About
             t6 = ttk.Frame(self._nb_widget)
             self._nb_widget.add(t6, text="  ℹ About  ")
             self._about_out = self._make_text(t6, font_size=10)
@@ -8581,7 +8586,8 @@ def launch_ui():
             a.delete('1.0', 'end')
 
             a.insert('end', "PERIODIC MACHINE — A Programmable Synthetic Biology Simulator\n", 'h1')
-            a.insert('end', "Version 2.0  ·  Language Spec v2.0  ·  50 tests  ·  18 opcodes  ·  30 parts\n\n", 'dimtext')
+            a.insert('end', "Version 2.1  ·  Language Spec v2.0  ·  60 tests  ·  18 opcodes  ·  30 parts\n", 'dimtext')
+            a.insert('end', "Human Genome Module  ·  Human Body Construction (37T cells, 13 systems)\n\n", 'dimtext')
 
             # ── WHAT IS THIS ────────────────────────────────────────────────
             a.insert('end', "═" * 72 + "\n", 'dimtext')
@@ -8971,6 +8977,35 @@ def launch_ui():
                 a.insert('end', f"  [{g}]  {threshold:<8}  {desc}\n")
 
             a.insert('end', "\n\n" + "═" * 72 + "\n", 'dimtext')
+            a.insert('end', "  HUMAN BODY CONSTRUCTION\n", 'h2')
+            a.insert('end', "═" * 72 + "\n\n", 'dimtext')
+            a.insert('end',
+                "  The Human Body module constructs complete organism architecture\n"
+                "  from atoms to organ systems using base-life repetition code.\n\n"
+                "  HIERARCHY (7 levels):\n"
+                "    1. ELEMENTS      — 18 chemical elements (O, C, H, N, Ca, P, ...)\n"
+                "    2. PROTEINS      — 29 major protein types (collagen, actin, tubulin, ...)\n"
+                "    3. ORGANELLES    — 14 organelle classes (nucleus, mitochondria, ER, ...)\n"
+                "    4. CELLS         — 43 specialized cell types (neurons, cardiomyocytes, ...)\n"
+                "    5. TISSUES       — 18 tissue classes (epidermis, muscle, nervous, ...)\n"
+                "    6. ORGANS        — 30 named organs (brain, heart, lungs, liver, ...)\n"
+                "    7. SYSTEMS       — 13 integrated organ systems\n\n"
+                "  SCALE:\n"
+                "    • Total cells: ~37 trillion (37,000,000,000,000)\n"
+                "    • Atoms per cell: ~7 trillion\n"
+                "    • Total atoms: ~2.59×10²⁶\n"
+                "    • Continuance multipliers: up to 200,000,000×\n\n"
+                "  CONSENSUS REPLICATION (Cancer Suppression):\n"
+                "    The system uses mathematical consensus to model how biological\n"
+                "    gene redundancy suppresses mutations. At 1M-fold consensus:\n"
+                "    • Base error rate: 0.8% → effectively 0%\n"
+                "    • All mutations rejected by majority vote\n"
+                "    • Cancer/mismatch propagation suppressed\n\n"
+                "  CLI COMMAND:\n"
+                "    python language.py --human-body\n"
+                "      → Constructs full organism and saves human_body_constructed.json\n\n")
+
+            a.insert('end', "═" * 72 + "\n", 'dimtext')
             a.insert('end', "  TECHNICAL NOTES\n", 'h2')
             a.insert('end', "═" * 72 + "\n\n", 'dimtext')
             a.insert('end',
@@ -8992,7 +9027,8 @@ def launch_ui():
                 "  Language spec versioning:\n"
                 "                v1.0 — BUILD/CONNECT/REPEAT/REGULATE/NOOP only\n"
                 "                v1.5 — adds MOTOR through MEMBRANE_INS\n"
-                "                v2.0 — full 18 opcodes including Z-prefix set\n\n")
+                "                v2.0 — full 18 opcodes including Z-prefix set\n"
+                "                v2.1 — adds Human Genome + Human Body modules\n\n")
 
             a.insert('end', "═" * 72 + "\n", 'dimtext')
             a.insert('end', "  OPEN SOURCE  ·  EDUCATIONAL  ·  RESEARCH TOOL\n", 'h2')
@@ -10721,6 +10757,195 @@ def launch_ui():
                             p.insert('end', f"{bar}\n", 'dimtext')
                 except Exception:
                     pass
+
+        def _build_human_body_tab(self, parent):
+            """Build the Human Body tab with complete organism architecture display."""
+            # Top control bar
+            ctrl = ttk.Frame(parent)
+            ctrl.pack(fill='x', padx=8, pady=6)
+
+            ttk.Label(ctrl, text="HUMAN BODY CONSTRUCTION  —  Complete Organism Architecture",
+                      font=('Consolas', 11, 'bold')).pack(side='left', padx=(0, 10))
+
+            ttk.Button(ctrl, text="🔄 Refresh", command=self._render_human_body).pack(side='left', padx=2)
+            ttk.Button(ctrl, text="📊 Summary", command=self._show_body_summary).pack(side='left', padx=2)
+
+            # Main paned display
+            paned = ttk.PanedWindow(parent, orient='horizontal')
+            paned.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Left: Hierarchical structure
+            lf = ttk.LabelFrame(paned, text=" ORGANISM HIERARCHY — 7 Levels from Atoms to Systems ")
+            paned.add(lf, weight=50)
+            self._hb_hierarchy = self._make_text(lf)
+            self._hb_hierarchy.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Right: Statistics & replication fidelity
+            rf = ttk.LabelFrame(paned, text=" STATISTICS & CONSENSUS REPLICATION ")
+            paned.add(rf, weight=50)
+            self._hb_stats = self._make_text(rf)
+            self._hb_stats.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Bottom: Organ system details
+            bot = ttk.LabelFrame(parent, text=" ORGAN SYSTEMS — 13 Integrated Systems ")
+            bot.pack(fill='x', padx=4, pady=4)
+            self._hb_systems = self._make_text(bot, height=12)
+            self._hb_systems.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Initial render
+            self._render_human_body()
+
+        def _render_human_body(self):
+            """Render the complete human body architecture into the tab."""
+            from language import (
+                HUMAN_ELEMENTAL_COMPOSITION, HUMAN_PROTEOME, HUMAN_ORGANELLES,
+                HUMAN_CELL_TYPES, HUMAN_TISSUES, HUMAN_ORGANS, HUMAN_ORGAN_SYSTEMS,
+                CELLS_IN_HUMAN_BODY, ATOMS_PER_CELL, calculate_proteome_mass
+            )
+
+            # Hierarchy panel
+            h = self._hb_hierarchy
+            h.delete('1.0', 'end')
+
+            h.tag_configure('h1', foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            h.tag_configure('h2', foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            h.tag_configure('val', foreground='#00ff88')
+            h.tag_configure('dim', foreground='#446688')
+            h.tag_configure('metric', foreground='#00d4ff')
+
+            h.insert('end', "HOMO SAPIENS — Complete Organism Specification\n", 'h1')
+            h.insert('end', f"Taxonomy: Eukaryota > Animalia > Chordata > Mammalia > Primates > Hominidae > Homo\n\n", 'dim')
+
+            # Level 1: Elements
+            h.insert('end', "LEVEL 1: ELEMENTAL COMPOSITION\n", 'h2')
+            total_mass_pct = sum(d['percent_mass'] for d in HUMAN_ELEMENTAL_COMPOSITION.values())
+            h.insert('end', f"  {len(HUMAN_ELEMENTAL_COMPOSITION)} elements  ·  {total_mass_pct:.1f}% total mass\n", 'val')
+            major = ['O', 'C', 'H', 'N', 'Ca', 'P']
+            for el in major:
+                d = HUMAN_ELEMENTAL_COMPOSITION[el]
+                h.insert('end', f"    {el:<3} {d['percent_mass']:>5.1f}%  —  {d['role'][:40]}...\n", 'dim')
+            h.insert('end', '\n')
+
+            # Level 2: Proteins
+            h.insert('end', "LEVEL 2: PROTEOME\n", 'h2')
+            prot_stats = calculate_proteome_mass()
+            max_mult = max(p['multiplier'] for p in HUMAN_PROTEOME.values())
+            max_prot = max(HUMAN_PROTEOME.items(), key=lambda x: x[1]['multiplier'])[0]
+            h.insert('end', f"  {len(HUMAN_PROTEOME)} major protein types\n", 'val')
+            h.insert('end', f"  Largest multiplier: {max_mult:,}× ({max_prot})\n", 'metric')
+            h.insert('end', f"  Enables scale without memory explosion\n\n", 'dim')
+
+            # Level 3: Organelles
+            h.insert('end', "LEVEL 3: ORGANELLES\n", 'h2')
+            h.insert('end', f"  {len(HUMAN_ORGANELLES)} organelle classes\n", 'val')
+            key_org = ['nucleus', 'mitochondrion', 'endoplasmic_reticulum', 'ribosome_cytosolic']
+            for org in key_org:
+                if org in HUMAN_ORGANELLES:
+                    mult = HUMAN_ORGANELLES[org].get('multiplier_per_cell', 1)
+                    h.insert('end', f"    {org:<25} {mult:,} per cell\n", 'dim')
+            h.insert('end', '\n')
+
+            # Level 4: Cell types
+            h.insert('end', "LEVEL 4: CELL TYPES\n", 'h2')
+            h.insert('end', f"  {len(HUMAN_CELL_TYPES)} specialized types\n", 'val')
+            h.insert('end', f"  Total in body: {CELLS_IN_HUMAN_BODY:,} cells\n", 'metric')
+            h.insert('end', f"  Atoms per cell: {ATOMS_PER_CELL:,} atoms\n", 'metric')
+            h.insert('end', f"  Total atoms: {CELLS_IN_HUMAN_BODY * ATOMS_PER_CELL:.2e}\n\n", 'dim')
+
+            # Level 5: Tissues
+            h.insert('end', "LEVEL 5: TISSUES\n", 'h2')
+            h.insert('end', f"  {len(HUMAN_TISSUES)} tissue classes\n", 'val')
+            key_tissues = ['epidermis', 'skeletal_muscle', 'nervous_tissue_CNS', 'blood']
+            for t in key_tissues:
+                if t in HUMAN_TISSUES:
+                    c = HUMAN_TISSUES[t]
+                    h.insert('end', f"    {t:<25} {c.get('cell_count', 0):,.0f} cells\n", 'dim')
+            h.insert('end', '\n')
+
+            # Level 6: Organs
+            h.insert('end', "LEVEL 6: ORGANS\n", 'h2')
+            h.insert('end', f"  {len(HUMAN_ORGANS)} named organs\n", 'val')
+            key_organs = ['brain', 'heart', 'lungs', 'liver', 'kidneys', 'skin']
+            for o in key_organs:
+                if o in HUMAN_ORGANS:
+                    d = HUMAN_ORGANS[o]
+                    h.insert('end', f"    {o:<15} {d.get('weight_kg', 0):>4.1f} kg  {d.get('cell_count', 0):,.0f} cells\n", 'dim')
+            h.insert('end', '\n')
+
+            # Level 7: Systems
+            h.insert('end', "LEVEL 7: ORGAN SYSTEMS\n", 'h2')
+            h.insert('end', f"  {len(HUMAN_ORGAN_SYSTEMS)} integrated systems\n", 'val')
+
+            # Stats panel
+            s = self._hb_stats
+            s.delete('1.0', 'end')
+
+            s.tag_configure('h1', foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            s.tag_configure('h2', foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            s.tag_configure('val', foreground='#00ff88')
+            s.tag_configure('dim', foreground='#446688')
+            s.tag_configure('metric', foreground='#00d4ff')
+            s.tag_configure('ok', foreground='#00ff88', font=('Consolas', 10, 'bold'))
+            s.tag_configure('warn', foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+
+            s.insert('end', "CONSENSUS REPLICATION — Cancer Suppression\n", 'h1')
+            s.insert('end', f"Base error rate (4-base): {BASE_SYSTEMS[4]['error_rate']*100:.2f}% per base\n\n", 'dim')
+
+            # Show consensus math
+            s.insert('end', "Error Suppression by Continuance Multiplier:\n", 'h2')
+            for mult in [1, 10, 100, 1000, 10000, 100000, 1000000]:
+                err = consensus_error_rate(BASE_SYSTEMS[4]['error_rate'], mult)
+                bar = '█' * max(0, int(-math.log10(err + 1e-300) / 3)) if err > 0 else '█' * 20
+                status = 'OK' if err < 1e-50 else ('WARN' if err < 0.001 else 'HIGH')
+                tag = 'ok' if err < 1e-50 else ('warn' if err < 0.001 else 'dim')
+                s.insert('end', f"  {mult:>10,}×  {err:.2e}  [{bar:<20}] {status}\n", tag)
+
+            s.insert('end', '\n')
+            s.insert('end', "Replication Fidelity:\n", 'h2')
+            s.insert('end', "  At 1M× consensus: mutations effectively eliminated\n", 'ok')
+            s.insert('end', "  Cancer suppression: active via majority-vote consensus\n", 'ok')
+            s.insert('end', "  Modeled after biological gene redundancy/paralogs\n", 'dim')
+
+            # Systems panel
+            sys_p = self._hb_systems
+            sys_p.delete('1.0', 'end')
+
+            sys_p.tag_configure('h1', foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            sys_p.tag_configure('h2', foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            sys_p.tag_configure('val', foreground='#00ff88')
+            sys_p.tag_configure('dim', foreground='#446688')
+            sys_p.tag_configure('metric', foreground='#00d4ff')
+
+            sys_p.insert('end', "INTEGRATED ORGAN SYSTEMS\n\n", 'h1')
+
+            for sys_name, sys_data in HUMAN_ORGAN_SYSTEMS.items():
+                sys_p.insert('end', f"{sys_name.upper().replace('_', ' ')}\n", 'h2')
+                funcs = sys_data.get('functions', [])
+                func_str = ' · '.join(funcs[:3]) if funcs else 'Multiple functions'
+                sys_p.insert('end', f"  Functions: {func_str}\n", 'dim')
+                cell_count = sys_data.get('cell_count', 0)
+                if cell_count:
+                    sys_p.insert('end', f"  Cells: {cell_count:,.0f}\n", 'metric')
+                mult = sys_data.get('multiplier', 0)
+                if mult:
+                    sys_p.insert('end', f"  Continuance multiplier: {mult:,}×\n", 'metric')
+                sys_p.insert('end', '\n')
+
+        def _show_body_summary(self):
+            """Show a popup with the human body summary."""
+            from language import human_body_summary
+            import tkinter as tk
+            from tkinter import messagebox
+            summary = human_body_summary()
+            # Simple dialog showing summary
+            top = tk.Toplevel(self)
+            top.title("Human Body Summary")
+            top.geometry("600x500")
+            txt = tk.Text(top, font=('Consolas', 10), wrap='word', bg='#0d0d1a', fg='#e0e0e0')
+            txt.pack(fill='both', expand=True, padx=10, pady=10)
+            txt.insert('1.0', summary)
+            txt.config(state='disabled')
+            ttk.Button(top, text="Close", command=top.destroy).pack(pady=5)
 
         def _render_life_form(self, org):
             """Render a full life-form intelligence report into the Blueprint panels."""
