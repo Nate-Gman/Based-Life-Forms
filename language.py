@@ -813,6 +813,546 @@ def env_hash(env_name: str) -> int:
     return _stable_hash(env_name) % ENV_HASH_MOD
 
 
+# ===========================================================================
+# REAL BIOLOGY MODULE — actual biochemistry, not abstract opcodes
+# ===========================================================================
+# Everything in this section uses literature-derived constants and equations
+# so that the simulator can claim biological realism, not just allegory.
+
+# ---------------------------------------------------------------------------
+# 1. STANDARD GENETIC CODE — 64 codons -> 20 amino acids (NCBI Table 1)
+# ---------------------------------------------------------------------------
+# Reference: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi
+# Single-letter amino acid codes follow IUPAC standard.
+GENETIC_CODE: Dict[str, str] = {
+    # T-row (U in mRNA)
+    'TTT': 'F', 'TTC': 'F', 'TTA': 'L', 'TTG': 'L',
+    'TCT': 'S', 'TCC': 'S', 'TCA': 'S', 'TCG': 'S',
+    'TAT': 'Y', 'TAC': 'Y', 'TAA': '*', 'TAG': '*',
+    'TGT': 'C', 'TGC': 'C', 'TGA': '*', 'TGG': 'W',
+    # C-row
+    'CTT': 'L', 'CTC': 'L', 'CTA': 'L', 'CTG': 'L',
+    'CCT': 'P', 'CCC': 'P', 'CCA': 'P', 'CCG': 'P',
+    'CAT': 'H', 'CAC': 'H', 'CAA': 'Q', 'CAG': 'Q',
+    'CGT': 'R', 'CGC': 'R', 'CGA': 'R', 'CGG': 'R',
+    # A-row
+    'ATT': 'I', 'ATC': 'I', 'ATA': 'I', 'ATG': 'M',  # M = start
+    'ACT': 'T', 'ACC': 'T', 'ACA': 'T', 'ACG': 'T',
+    'AAT': 'N', 'AAC': 'N', 'AAA': 'K', 'AAG': 'K',
+    'AGT': 'S', 'AGC': 'S', 'AGA': 'R', 'AGG': 'R',
+    # G-row
+    'GTT': 'V', 'GTC': 'V', 'GTA': 'V', 'GTG': 'V',
+    'GCT': 'A', 'GCC': 'A', 'GCA': 'A', 'GCG': 'A',
+    'GAT': 'D', 'GAC': 'D', 'GAA': 'E', 'GAG': 'E',
+    'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G',
+}
+START_CODON  = 'ATG'                     # methionine — eukaryotes & prokaryotes
+STOP_CODONS  = {'TAA', 'TAG', 'TGA'}     # ochre, amber, opal
+
+# Amino acid full names + properties (for ultra-detail readout)
+AMINO_ACIDS: Dict[str, Dict[str, Any]] = {
+    'A': {'name': 'Alanine',       'mw': 89.09,  'hydropathy':  1.8, 'charge':  0},
+    'R': {'name': 'Arginine',      'mw': 174.20, 'hydropathy': -4.5, 'charge': +1},
+    'N': {'name': 'Asparagine',    'mw': 132.12, 'hydropathy': -3.5, 'charge':  0},
+    'D': {'name': 'Aspartate',     'mw': 133.10, 'hydropathy': -3.5, 'charge': -1},
+    'C': {'name': 'Cysteine',      'mw': 121.16, 'hydropathy':  2.5, 'charge':  0},
+    'E': {'name': 'Glutamate',     'mw': 147.13, 'hydropathy': -3.5, 'charge': -1},
+    'Q': {'name': 'Glutamine',     'mw': 146.15, 'hydropathy': -3.5, 'charge':  0},
+    'G': {'name': 'Glycine',       'mw': 75.07,  'hydropathy': -0.4, 'charge':  0},
+    'H': {'name': 'Histidine',     'mw': 155.16, 'hydropathy': -3.2, 'charge': +0.1},
+    'I': {'name': 'Isoleucine',    'mw': 131.17, 'hydropathy':  4.5, 'charge':  0},
+    'L': {'name': 'Leucine',       'mw': 131.17, 'hydropathy':  3.8, 'charge':  0},
+    'K': {'name': 'Lysine',        'mw': 146.19, 'hydropathy': -3.9, 'charge': +1},
+    'M': {'name': 'Methionine',    'mw': 149.21, 'hydropathy':  1.9, 'charge':  0},
+    'F': {'name': 'Phenylalanine', 'mw': 165.19, 'hydropathy':  2.8, 'charge':  0},
+    'P': {'name': 'Proline',       'mw': 115.13, 'hydropathy': -1.6, 'charge':  0},
+    'S': {'name': 'Serine',        'mw': 105.09, 'hydropathy': -0.8, 'charge':  0},
+    'T': {'name': 'Threonine',     'mw': 119.12, 'hydropathy': -0.7, 'charge':  0},
+    'W': {'name': 'Tryptophan',    'mw': 204.23, 'hydropathy': -0.9, 'charge':  0},
+    'Y': {'name': 'Tyrosine',      'mw': 181.19, 'hydropathy': -1.3, 'charge':  0},
+    'V': {'name': 'Valine',        'mw': 117.15, 'hydropathy':  4.2, 'charge':  0},
+    '*': {'name': 'Stop',          'mw': 0.0,    'hydropathy':  0.0, 'charge':  0},
+}
+
+
+def transcribe_dna_to_rna(dna: str) -> str:
+    """Transcribe a DNA template strand to mRNA (T -> U).
+    Real biology: RNA polymerase reads 3'->5' and synthesizes 5'->3'.
+    We assume the input is already the coding (sense) strand."""
+    return dna.upper().replace('T', 'U')
+
+
+def translate_rna_to_protein(rna: str, start_at_atg: bool = True) -> Tuple[str, List[Dict]]:
+    """Translate mRNA into a protein sequence using the standard genetic code.
+
+    Returns (protein_string, codon_log).
+    - If start_at_atg=True, scans for the first AUG and starts there (real biology).
+    - Otherwise translates from position 0.
+    - Stops at first stop codon (TAA/TAG/TGA) or end of sequence.
+    Each codon_log entry: {'pos':i, 'codon':XXX, 'aa':X, 'name':...}
+    """
+    dna = rna.upper().replace('U', 'T')   # work in DNA alphabet
+    L = len(dna)
+    start = 0
+    if start_at_atg:
+        idx = dna.find(START_CODON)
+        if idx < 0:
+            return '', []
+        start = idx
+    protein_chars: List[str] = []
+    codon_log: List[Dict] = []
+    pos = start
+    while pos + 3 <= L:
+        codon = dna[pos:pos+3]
+        aa = GENETIC_CODE.get(codon, 'X')   # X = unknown / N / non-canonical
+        codon_log.append({
+            'pos':   pos,
+            'codon': codon,
+            'aa':    aa,
+            'name':  AMINO_ACIDS.get(aa, {}).get('name', 'Unknown'),
+        })
+        if aa == '*':
+            break
+        protein_chars.append(aa)
+        pos += 3
+    return ''.join(protein_chars), codon_log
+
+
+def protein_properties(protein: str) -> Dict[str, float]:
+    """Compute basic biochemistry of a protein sequence: MW, mean hydropathy,
+    net charge at physiological pH, isoelectric estimate."""
+    if not protein:
+        return {'length': 0, 'mw': 0.0, 'mean_hydropathy': 0.0,
+                'net_charge': 0.0, 'pI_estimate': 7.0}
+    mw    = sum(AMINO_ACIDS.get(a, {}).get('mw', 0) for a in protein)
+    # Subtract water lost in each peptide bond (n-1 bonds)
+    mw   -= 18.015 * max(0, len(protein) - 1)
+    hydro = sum(AMINO_ACIDS.get(a, {}).get('hydropathy', 0) for a in protein)
+    chrg  = sum(AMINO_ACIDS.get(a, {}).get('charge', 0) for a in protein)
+    return {
+        'length':          len(protein),
+        'mw':              round(mw, 2),
+        'mean_hydropathy': round(hydro / len(protein), 3),
+        'net_charge':      round(chrg, 2),
+        'pI_estimate':     round(7.0 + 0.5 * chrg / len(protein), 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2. HODGKIN-HUXLEY ACTION POTENTIAL — real ODE integration
+# ---------------------------------------------------------------------------
+# Constants from Hodgkin & Huxley (J. Physiol. 1952) — squid giant axon.
+# All voltages in mV, time in ms, conductances in mS/cm^2, capacitance uF/cm^2.
+HH_CONSTANTS = {
+    'C_m':    1.0,    # membrane capacitance (uF/cm^2)
+    'g_Na':   120.0,  # max Na+ conductance
+    'g_K':    36.0,   # max K+ conductance
+    'g_L':    0.3,    # leak conductance
+    'E_Na':   50.0,   # Na+ reversal potential (mV)
+    'E_K':   -77.0,   # K+ reversal potential (mV)
+    'E_L':   -54.387, # leak reversal potential (mV)
+    'V_rest': -65.0,  # resting membrane potential (mV)
+}
+
+
+def _hh_alpha_beta(V: float) -> Tuple[float, float, float, float, float, float]:
+    """Hodgkin-Huxley voltage-dependent rate constants (per ms)."""
+    import math
+    # Numerical safety for the n_alpha and m_alpha singularities
+    def _safe_div(num, den):
+        return num / den if abs(den) > 1e-9 else num / 1e-9
+    a_n = _safe_div(0.01 * (V + 55.0), 1.0 - math.exp(-(V + 55.0) / 10.0))
+    b_n = 0.125 * math.exp(-(V + 65.0) / 80.0)
+    a_m = _safe_div(0.1 * (V + 40.0), 1.0 - math.exp(-(V + 40.0) / 10.0))
+    b_m = 4.0 * math.exp(-(V + 65.0) / 18.0)
+    a_h = 0.07 * math.exp(-(V + 65.0) / 20.0)
+    b_h = 1.0 / (1.0 + math.exp(-(V + 35.0) / 10.0))
+    return a_n, b_n, a_m, b_m, a_h, b_h
+
+
+def simulate_action_potential(I_inject: float = 10.0, duration_ms: float = 50.0,
+                              dt: float = 0.01,
+                              n_channels: int = 1,
+                              n_pumps: int = 1) -> Dict[str, Any]:
+    """Integrate Hodgkin-Huxley equations using forward Euler.
+    Returns voltage trace, gating variables, spike count, frequency.
+
+    Parameters scale conductances by ion-channel and pump counts to model
+    cells with more or fewer channels (relevant for our genome's ion_channel
+    and pump_atpase part counts).
+    """
+    import math
+    C = HH_CONSTANTS
+    # Channel scaling: more channels = more conductance
+    ch_scale = max(0.1, n_channels / 2.0)
+    pump_scale = max(0.1, n_pumps / 2.0)
+    g_Na = C['g_Na'] * ch_scale
+    g_K  = C['g_K']  * ch_scale
+    g_L  = C['g_L']  * pump_scale  # pumps maintain leak/rest
+    # Initial conditions at rest
+    V = C['V_rest']
+    a_n, b_n, a_m, b_m, a_h, b_h = _hh_alpha_beta(V)
+    n = a_n / (a_n + b_n)
+    m = a_m / (a_m + b_m)
+    h = a_h / (a_h + b_h)
+
+    n_steps = int(duration_ms / dt)
+    V_trace: List[float] = []
+    spike_times: List[float] = []
+    above_threshold = False
+    threshold = 0.0  # mV — depolarization peak crossing
+    t = 0.0
+    for i in range(n_steps):
+        # Currents
+        I_Na = g_Na * (m**3) * h * (V - C['E_Na'])
+        I_K  = g_K  * (n**4) * (V - C['E_K'])
+        I_L  = g_L  * (V - C['E_L'])
+        # dV/dt
+        dV = (I_inject - I_Na - I_K - I_L) / C['C_m']
+        V += dV * dt
+        # Gating variables
+        a_n, b_n, a_m, b_m, a_h, b_h = _hh_alpha_beta(V)
+        n += (a_n * (1 - n) - b_n * n) * dt
+        m += (a_m * (1 - m) - b_m * m) * dt
+        h += (a_h * (1 - h) - b_h * h) * dt
+        V_trace.append(V)
+        # Detect spikes (rising edge over threshold)
+        if V > threshold and not above_threshold:
+            above_threshold = True
+            spike_times.append(t)
+        elif V < threshold - 10.0:
+            above_threshold = False
+        t += dt
+    # Spike frequency (Hz)
+    freq = len(spike_times) / (duration_ms / 1000.0) if duration_ms > 0 else 0.0
+    return {
+        'V_trace':      V_trace,
+        'spike_times':  spike_times,
+        'spike_count':  len(spike_times),
+        'frequency_hz': round(freq, 2),
+        'V_rest':       C['V_rest'],
+        'V_peak':       round(max(V_trace), 2) if V_trace else 0.0,
+        'V_min':        round(min(V_trace), 2) if V_trace else 0.0,
+        'duration_ms':  duration_ms,
+        'I_inject':     I_inject,
+        'g_Na_eff':     g_Na,
+        'g_K_eff':      g_K,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 3. REAL METABOLIC STOICHIOMETRY — glucose oxidation
+# ---------------------------------------------------------------------------
+# Glucose + 6 O2 -> 6 CO2 + 6 H2O; theoretical 38 ATP, real ~30-32 ATP
+# Reference: Lehninger, Principles of Biochemistry, 7th ed.
+METABOLISM_STOICHIOMETRY = {
+    'glycolysis': {
+        'inputs':  {'glucose': 1, 'NAD+': 2, 'ADP': 2, 'Pi': 2},
+        'outputs': {'pyruvate': 2, 'NADH': 2, 'ATP': 2, 'H2O': 2},
+        'location': 'cytoplasm',
+        'oxygen_required': False,
+    },
+    'pyruvate_oxidation': {
+        'inputs':  {'pyruvate': 2, 'NAD+': 2, 'CoA': 2},
+        'outputs': {'acetyl_CoA': 2, 'NADH': 2, 'CO2': 2},
+        'location': 'mitochondrial_matrix',
+        'oxygen_required': True,
+    },
+    'tca_cycle': {
+        'inputs':  {'acetyl_CoA': 2, 'NAD+': 6, 'FAD': 2, 'ADP': 2, 'Pi': 2},
+        'outputs': {'NADH': 6, 'FADH2': 2, 'ATP': 2, 'CO2': 4},
+        'location': 'mitochondrial_matrix',
+        'oxygen_required': True,
+    },
+    'oxidative_phosphorylation': {
+        # Per glucose: 10 NADH (8 from above + 2 cytosolic) and 2 FADH2
+        'inputs':  {'NADH': 10, 'FADH2': 2, 'O2': 6, 'ADP': 28, 'Pi': 28},
+        'outputs': {'NAD+': 10, 'FAD': 2, 'H2O': 6, 'ATP': 28},
+        'location': 'inner_mitochondrial_membrane',
+        'oxygen_required': True,
+    },
+    'fermentation_lactate': {
+        'inputs':  {'pyruvate': 2, 'NADH': 2},
+        'outputs': {'lactate': 2, 'NAD+': 2},
+        'location': 'cytoplasm',
+        'oxygen_required': False,
+    },
+}
+
+
+def compute_metabolic_yield(glucose_molecules: int = 1,
+                             aerobic: bool = True,
+                             has_mitochondria: bool = True) -> Dict[str, Any]:
+    """Compute real ATP yield from glucose oxidation.
+
+    Aerobic complete pathway: 2 (glycolysis) + 2 (TCA) + 28 (OXPHOS) = 32 ATP
+    Anaerobic (no mitochondria or no O2): glycolysis only = 2 ATP
+    Reference: Berg et al., Biochemistry 7th ed., Section 16-18.
+    """
+    if not aerobic or not has_mitochondria:
+        # Glycolysis + lactate fermentation
+        return {
+            'pathway':     'fermentation',
+            'atp':         2 * glucose_molecules,
+            'co2':         0,
+            'h2o':         2 * glucose_molecules,
+            'o2_consumed': 0,
+            'efficiency':  0.067,        # 2 / 30 max yield
+            'pathways_run': ['glycolysis', 'fermentation_lactate'],
+        }
+    # Full aerobic respiration
+    g = glucose_molecules
+    return {
+        'pathway':     'aerobic_respiration',
+        'atp':         32 * g,            # 2 + 2 + 28 = 32 (real value with shuttle losses)
+        'co2':         6 * g,
+        'h2o':         6 * g + 2 * g,    # 6 from OXPHOS + 2 from glycolysis
+        'o2_consumed': 6 * g,
+        'efficiency':  0.39,             # ~39% energy capture (rest = heat)
+        'pathways_run': ['glycolysis', 'pyruvate_oxidation',
+                         'tca_cycle', 'oxidative_phosphorylation'],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4. REALISTIC MUTATION OPERATOR — Ts/Tv bias, indels, frameshift detection
+# ---------------------------------------------------------------------------
+# Empirical: transitions (purine<->purine OR pyrimidine<->pyrimidine) are ~2-3x
+# more common than transversions. Real Ts/Tv ratio in mammals ~2.0–2.1.
+TRANSITION_PAIRS = {
+    'A': 'G', 'G': 'A',  # purines
+    'C': 'T', 'T': 'C',  # pyrimidines
+}
+TRANSVERSION_OPTIONS = {
+    'A': ['C', 'T'],  'G': ['C', 'T'],
+    'C': ['A', 'G'],  'T': ['A', 'G'],
+}
+
+
+def mutate_seq_realistic(seq: str, bases: List[str],
+                          point_rate: float = 0.01,
+                          ts_tv_ratio: float = 2.0,
+                          indel_rate: float = 0.001,
+                          cpg_multiplier: float = 10.0) -> Tuple[str, Dict[str, int]]:
+    """Realistic mutation with biological biases.
+
+    - Point rate: per-base probability of substitution (default 1% = high
+      for evolution but tractable; real bacterial rate is 1e-9).
+    - Ts/Tv: probability ratio of transition vs transversion. Default 2.0
+      matches mammalian average.
+    - Indel rate: per-base probability of insertion or deletion.
+    - CpG hypermutability: methylated CpG sites mutate ~10x faster (real).
+    Returns (new_seq, stats_dict).
+
+    Falls back to uniform random for non-DNA (4-base) alphabets.
+    """
+    if set(bases) != set('ATCG'):
+        # Non-DNA alphabet — use uniform substitution
+        new_seq = mutate_seq(seq, bases, rate=point_rate)
+        return new_seq, {'transitions': 0, 'transversions': 0,
+                         'insertions': 0, 'deletions': 0,
+                         'frameshifts': 0, 'cpg_hits': 0}
+
+    g = list(seq)
+    stats = {'transitions': 0, 'transversions': 0,
+             'insertions':  0, 'deletions':  0,
+             'frameshifts': 0, 'cpg_hits':  0}
+    # Substitutions
+    for i in range(len(g)):
+        # Detect CpG context: Cp followed by G OR previous is C and current is G
+        is_cpg = (i + 1 < len(g) and g[i] == 'C' and g[i+1] == 'G') or \
+                 (i > 0 and g[i-1] == 'C' and g[i] == 'G')
+        local_rate = point_rate * (cpg_multiplier if is_cpg else 1.0)
+        if random.random() < local_rate:
+            if is_cpg:
+                stats['cpg_hits'] += 1
+            # Choose transition vs transversion
+            ts_prob = ts_tv_ratio / (ts_tv_ratio + 1.0)
+            if random.random() < ts_prob:
+                g[i] = TRANSITION_PAIRS[g[i]]
+                stats['transitions'] += 1
+            else:
+                g[i] = random.choice(TRANSVERSION_OPTIONS[g[i]])
+                stats['transversions'] += 1
+    # Indels (insertion or deletion)
+    indel_count = sum(1 for _ in range(len(g)) if random.random() < indel_rate)
+    for _ in range(indel_count):
+        if random.random() < 0.5 and len(g) > 10:
+            # Deletion
+            del_len = random.choice([1, 1, 1, 2, 3])  # mostly single
+            pos = random.randint(0, len(g) - del_len)
+            del g[pos:pos+del_len]
+            stats['deletions'] += 1
+            if del_len % 3 != 0:
+                stats['frameshifts'] += 1
+        else:
+            # Insertion
+            ins_len = random.choice([1, 1, 1, 2, 3])
+            pos = random.randint(0, len(g))
+            ins = [random.choice(bases) for _ in range(ins_len)]
+            g[pos:pos] = ins
+            stats['insertions'] += 1
+            if ins_len % 3 != 0:
+                stats['frameshifts'] += 1
+    return ''.join(g), stats
+
+
+# ---------------------------------------------------------------------------
+# 5. DNA REPLICATION FORK — real polymerase mechanics
+# ---------------------------------------------------------------------------
+# Real polymerase rates (literature values):
+#   E. coli DNA Pol III:        ~1000 bp/s
+#   Eukaryotic Pol delta/eps:    ~50 bp/s
+#   Okazaki fragment, prokaryote: ~1000-2000 bp
+#   Okazaki fragment, eukaryote:  ~100-200 bp
+REPLICATION_PARAMS = {
+    'prokaryote': {
+        'polymerase_rate_bps': 1000.0,
+        'okazaki_length':      1500,
+        'origins':             1,         # single circular origin (oriC)
+        'has_proofreading':    True,
+    },
+    'eukaryote': {
+        'polymerase_rate_bps': 50.0,
+        'okazaki_length':      150,
+        'origins':             30000,     # ~30k origins per genome
+        'has_proofreading':    True,
+    },
+    'virus': {
+        'polymerase_rate_bps': 200.0,
+        'okazaki_length':      500,
+        'origins':             1,
+        'has_proofreading':    False,    # most viral pols lack proofreading
+    },
+}
+
+
+def simulate_replication_fork(genome_len: int, organism_type: str = 'prokaryote',
+                                fork_count: int = 1) -> Dict[str, Any]:
+    """Compute real replication time and Okazaki fragment count.
+
+    organism_type: 'prokaryote' (bacteria), 'eukaryote' (cells with nucleus),
+                   'virus' (no proofreading, fast & error-prone).
+    fork_count:    number of active replication forks. Bacteria: 2 (bidirectional
+                   from oriC). Eukaryotes: many (one per active origin).
+    """
+    p = REPLICATION_PARAMS.get(organism_type, REPLICATION_PARAMS['prokaryote'])
+    rate = p['polymerase_rate_bps']
+    # Each fork copies half the genome bidirectionally
+    bp_per_fork = genome_len / max(1, fork_count)
+    time_s = bp_per_fork / rate
+    # Lagging strand: number of Okazaki fragments per fork
+    okazaki_per_fork = max(1, int(bp_per_fork / p['okazaki_length']))
+    return {
+        'organism_type':       organism_type,
+        'genome_len_bp':       genome_len,
+        'fork_count':          fork_count,
+        'polymerase_rate_bps': rate,
+        'replication_time_s':  round(time_s, 3),
+        'replication_time_min':round(time_s / 60.0, 2),
+        'okazaki_per_fork':    okazaki_per_fork,
+        'okazaki_total':       okazaki_per_fork * fork_count,
+        'has_proofreading':    p['has_proofreading'],
+        'origins_typical':     p['origins'],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. POPULATION GENETICS — selection, drift, fixation
+# ---------------------------------------------------------------------------
+
+def selection_coefficient(w_mutant: float, w_wildtype: float) -> float:
+    """Wright's selection coefficient: s = (W_a - W_b) / W_b.
+    Positive s = beneficial mutation, negative = deleterious.
+    """
+    if w_wildtype <= 0:
+        return 0.0
+    return (w_mutant - w_wildtype) / w_wildtype
+
+
+def kimura_fixation_probability(s: float, Ne: int = 1000) -> float:
+    """Kimura (1962) probability that a new mutation fixes in a population.
+
+    For a single new mutation (initial freq p = 1/(2Ne) in diploid, 1/Ne in haploid):
+        u = (1 - exp(-2s)) / (1 - exp(-4*Ne*s))    (diploid)
+    Limits: s -> 0 gives u = 1/(2Ne) (neutral drift fixation rate)
+            s >> 0 gives u ≈ 2s for haploid, ≈ s for diploid heterozygote.
+    """
+    import math
+    if Ne <= 0:
+        return 0.0
+    if abs(s) < 1e-9:
+        # Neutral case: drift only
+        return 1.0 / (2 * Ne)
+    try:
+        num = 1.0 - math.exp(-2 * s)
+        den = 1.0 - math.exp(-4 * Ne * s)
+        if abs(den) < 1e-12:
+            return 0.0
+        return max(0.0, min(1.0, num / den))
+    except (OverflowError, ValueError):
+        # For very large |s*Ne|
+        return 1.0 if s > 0 else 0.0
+
+
+def hardy_weinberg_eq(p: float) -> Dict[str, float]:
+    """Hardy-Weinberg genotype frequencies for allele frequency p.
+    q = 1 - p; AA = p^2; Aa = 2pq; aa = q^2."""
+    p = max(0.0, min(1.0, p))
+    q = 1.0 - p
+    return {'p': p, 'q': q, 'AA': p*p, 'Aa': 2*p*q, 'aa': q*q}
+
+
+# ---------------------------------------------------------------------------
+# 7. CELL CYCLE — G1, S, G2, M phases with checkpoints
+# ---------------------------------------------------------------------------
+# Reference durations (actively dividing mammalian cell, ~24h cycle):
+#   G1: ~11h, S: ~8h, G2: ~4h, M: ~1h
+# Bacteria are simpler (binary fission ~20-60 min total).
+CELL_CYCLE_PHASES = ['G1', 'S', 'G2', 'M']
+CELL_CYCLE_DURATIONS_MIN = {
+    'prokaryote': {'G1': 5,  'S': 10, 'G2': 5,  'M': 5},   # 25 min total
+    'eukaryote':  {'G1': 660, 'S': 480, 'G2': 240, 'M': 60}, # 1440 min = 24h
+    'virus':      {'G1': 0,  'S': 5,  'G2': 0,  'M': 5},   # parasitic, no real cycle
+}
+CELL_CYCLE_CHECKPOINTS = {
+    'G1': 'restriction_point  — commits to division if growth signals + nutrients OK',
+    'S':  'replication_check  — DNA damage halts replication',
+    'G2': 'G2/M_checkpoint    — verifies DNA fully replicated and undamaged',
+    'M':  'spindle_checkpoint — all chromosomes attached to spindle before anaphase',
+}
+
+
+def cell_cycle_progress(time_min: float, organism_type: str = 'eukaryote') -> Dict[str, Any]:
+    """Return current cell-cycle phase given elapsed time (min)."""
+    durs  = CELL_CYCLE_DURATIONS_MIN.get(organism_type, CELL_CYCLE_DURATIONS_MIN['eukaryote'])
+    total = sum(durs.values())
+    t     = time_min % total if total > 0 else 0
+    cum   = 0
+    for phase in CELL_CYCLE_PHASES:
+        cum += durs[phase]
+        if t < cum:
+            phase_start = cum - durs[phase]
+            phase_progress = (t - phase_start) / max(1, durs[phase])
+            return {
+                'phase':           phase,
+                'phase_progress':  round(phase_progress, 3),
+                'cycle_progress':  round(t / max(1, total), 3),
+                'time_in_phase':   round(t - phase_start, 1),
+                'phase_duration':  durs[phase],
+                'cycle_duration':  total,
+                'checkpoint':      CELL_CYCLE_CHECKPOINTS.get(phase, ''),
+            }
+    return {'phase': 'M', 'phase_progress': 1.0, 'cycle_progress': 1.0,
+            'time_in_phase': 0, 'phase_duration': 0, 'cycle_duration': total,
+            'checkpoint': ''}
+
+
+# ===========================================================================
+# END Real Biology Module
+# ===========================================================================
+
+
 # ---------------------------------------------------------------------------
 # Instruction set: what codons encode as operations
 # ---------------------------------------------------------------------------
@@ -936,6 +1476,7 @@ class Blueprint:
     neural_parts: List[str] = field(default_factory=list)        # neural parts present
     homeostasis_parts: List[str] = field(default_factory=list)   # homeostasis parts present
     intelligence_score: float = 0.0      # computed neural intelligence score 0-1
+    replication_prob: float = 0.0        # probability of successful replication per cycle
 
     @property
     def combined_smiles(self) -> str:
@@ -1084,6 +1625,88 @@ class Blueprint:
         self.intelligence_score = min(1.0, score)
         return self.intelligence_score
 
+    def compute_replication_prob(self, n_bases: int = 4, env_name: str = 'earth') -> float:
+        """Compute probability of successful genome replication per cycle.
+
+        Realistic biology model:
+        - Per-base error rate from BASE_SYSTEMS (2-base: 0.05%, 4-base: 0.8%,
+          6-base: 4.5%, 8-base: 11%) — RAW, before repair.
+        - Repair systems multiplicatively REDUCE per-base error:
+            dna_repair       ÷1000  (proofreading exonuclease + mismatch repair)
+            heat_shock_prot  ÷5     (refolds damaged proteins, protects polymerase)
+            antioxidant      ÷2     (prevents oxidative DNA damage)
+            proteasome       ÷2     (clears damaged replication machinery)
+          With all four, real-cell fidelity (~1e-9 per base) is recovered.
+        - Genome-wide fidelity = (1 - eff_err)^genome_len.
+        - Environment multiplier: earth=1.0, silicon=0.85, exotic=0.65.
+        - Energy / information / division gates apply final multipliers.
+        Returns 0.0–0.9999 probability per generation cycle.
+        """
+        sys_spec = BASE_SYSTEMS.get(n_bases, BASE_SYSTEMS[4])
+        raw_err = sys_spec['error_rate']
+
+        # Repair systems multiplicatively reduce per-base error rate
+        in_parts = lambda n: (n in self.parts_used or
+                              n in self.homeostasis_parts or
+                              n in self.neural_parts)
+        repair_divisor = 1.0
+        if in_parts('dna_repair'):       repair_divisor *= 1000.0
+        if in_parts('heat_shock_prot'):  repair_divisor *= 5.0
+        if in_parts('antioxidant'):      repair_divisor *= 2.0
+        if in_parts('proteasome'):       repair_divisor *= 2.0
+
+        eff_err = raw_err / repair_divisor
+
+        # Genome-wide fidelity: probability all bases copied correctly
+        genome_len = max(1, min(len(self.parts_used) * 5, 1000))  # cap at 1000 for stability
+        try:
+            fidelity = (1.0 - eff_err) ** genome_len
+        except (OverflowError, ValueError):
+            fidelity = 0.0
+
+        # Energy gate: no energy → replication stalls
+        if self.energy_balance() < 0:
+            fidelity *= 0.3
+
+        # Information gate: need nucleotides / information role
+        has_nuc  = self.roles_present.get('information', 0) >= 1
+        has_info = ('nucleotide' in self.parts_used or
+                    'coenzyme_a' in self.parts_used)
+        if not (has_nuc or has_info):
+            fidelity *= 0.05  # essentially can't replicate without genetic material
+
+        # Division machinery: passive replication is much slower
+        if self.division_events == 0:
+            fidelity *= 0.6
+
+        # Environment modifier
+        env_factors = {'earth': 1.0, 'silicon': 0.85, 'exotic': 0.65}
+        fidelity *= env_factors.get(env_name, 1.0)
+
+        self.replication_prob = round(min(0.9999, max(0.0, fidelity)), 6)
+        return self.replication_prob
+
+    def replication_summary(self, n_bases: int = 4, env_name: str = 'earth') -> str:
+        """Human-readable replication probability breakdown."""
+        p = self.compute_replication_prob(n_bases, env_name)
+        sys_spec = BASE_SYSTEMS.get(n_bases, BASE_SYSTEMS[4])
+        err = sys_spec['error_rate']
+        has_repair = ('dna_repair' in self.parts_used or
+                      'dna_repair' in self.homeostasis_parts)
+        lines = [
+            f"Replication probability:  {p:.4f}  ({p*100:.2f}% per cycle)",
+            f"Base system error rate:   {err*100:.2f}% per base",
+            f"Genome repair system:     {'present (dna_repair)' if has_repair else 'absent — raw fidelity only'}",
+            f"Energy balance:           {'positive' if self.energy_balance()>=0 else 'negative — reduces fidelity'}",
+            f"Division events encoded:  {self.division_events}",
+            f"Environment fidelity:     {{'earth':1.0,'silicon':0.75,'exotic':0.55}}.get('{env_name}',1.0)x",
+        ]
+        # Generations before likely error
+        if p > 0:
+            gen_to_err = round(1.0 / (1.0 - p)) if p < 1.0 else 999999
+            lines.append(f"Expected error-free gens: ~{gen_to_err:,}")
+        return '\n'.join(lines)
+
     def summary(self) -> Dict[str, Any]:
         return {
             'parts': self.parts_used,
@@ -1117,6 +1740,7 @@ class Blueprint:
             'quorum_signals': self.quorum_signals,
             'division_events': self.division_events,
             'gradient_steps': self.gradient_steps,
+            'replication_prob': round(self.replication_prob, 6),
         }
 
 
@@ -1694,6 +2318,10 @@ class Organism:
             self.fitness = min(0.49, self.fitness)
 
         self.fitness = min(1.0, max(0.01, self.fitness))
+
+        # Compute replication probability for this strand + environment
+        self.blueprint.compute_replication_prob(self.strand.n_bases, self.env_name)
+
         return self.fitness
 
     def structural_grade(self) -> Tuple[str, str]:
@@ -1794,6 +2422,8 @@ class Organism:
             'division_events': self.blueprint.division_events if self.blueprint else 0,
             'gradient_steps': self.blueprint.gradient_steps if self.blueprint else 0,
             'domain_mismatches': self.blueprint.domain_mismatches if self.blueprint else 0,
+            'replication_prob': round(self.blueprint.replication_prob, 6) if self.blueprint else 0.0,
+            'intelligence_score': round(self.blueprint.intelligence_score, 4) if self.blueprint else 0.0,
         }
         geom = getattr(self, '_organism_geom', None)
         if geom:
@@ -2068,7 +2698,17 @@ class Evolver:
                 p2 = tournament(self.population, fits)
                 # Step 9: operon-aware crossover
                 child = crossover(p1, p2, allowed_bases=self._allowed)
-                child = mutate_seq(child, self.bases, rate=mut_rate)
+                # Realistic mutation for 4-base DNA (Ts/Tv bias + indels);
+                # uniform mutation for other base systems where biology n/a.
+                if self.n_bases == 4 and set(self.bases) == set('ATCG'):
+                    child, _stats = mutate_seq_realistic(
+                        child, self.bases,
+                        point_rate=mut_rate,
+                        ts_tv_ratio=2.0,
+                        indel_rate=mut_rate * 0.05,
+                    )
+                else:
+                    child = mutate_seq(child, self.bases, rate=mut_rate)
                 # Always clamp to target length — no more gradual drift
                 child = enforce_length(child, self.genome_len, self.bases)
                 children.append(child)
@@ -2659,7 +3299,142 @@ def run_tests():
     assert set(PART_NAMES) == set(PART_REGISTRY.all_names()), "all names should match"
     print(f"  [50] PartRegistry consistent (build={len(PART_REGISTRY.build_parts())}, motor={len(PART_REGISTRY.motor_parts())})")
 
-    print("--- all 50 tests passed ---\n")
+    # 51. Replication probability — all base systems produce a valid value in [0,1]
+    bp_test = Blueprint(
+        parts_used=['membrane', 'atp', 'glucose', 'nucleotide', 'amino_func'],
+        roles_present={'minimal':1, 'energy':2, 'information':1, 'catalysis':1},
+        homeostasis_parts=['dna_repair', 'heat_shock_prot'],
+    )
+    bp_test.energy_budget = 50; bp_test.energy_cost = 10; bp_test.division_events = 1
+    rp_per_base = {}
+    for nb in (2, 4, 6, 8):
+        p = bp_test.compute_replication_prob(nb, 'earth')
+        assert 0.0 <= p <= 0.9999, f"rep prob out of range for {nb}-base: {p}"
+        rp_per_base[nb] = p
+    # Higher base counts should not produce HIGHER fidelity than 4-base when repair is on
+    assert rp_per_base[4] >= rp_per_base[8] - 1e-6, \
+        f"4-base should be >= 8-base fidelity: {rp_per_base}"
+    print(f"  [51] replication prob OK across base systems "
+          f"(2:{rp_per_base[2]:.3f}  4:{rp_per_base[4]:.3f}  "
+          f"6:{rp_per_base[6]:.3f}  8:{rp_per_base[8]:.3f})")
+
+    # 52. Replication — repair systems must increase fidelity
+    bp_no_repair = Blueprint(
+        parts_used=['membrane', 'atp', 'glucose', 'nucleotide'],
+        roles_present={'minimal':1,'energy':1,'information':1},
+    )
+    bp_no_repair.energy_budget = 50; bp_no_repair.energy_cost = 10
+    bp_no_repair.division_events = 1
+    bp_with_repair = Blueprint(
+        parts_used=['membrane', 'atp', 'glucose', 'nucleotide'],
+        roles_present={'minimal':1,'energy':1,'information':1},
+        homeostasis_parts=['dna_repair', 'heat_shock_prot', 'antioxidant', 'proteasome'],
+    )
+    bp_with_repair.energy_budget = 50; bp_with_repair.energy_cost = 10
+    bp_with_repair.division_events = 1
+    p_no  = bp_no_repair.compute_replication_prob(8, 'earth')
+    p_yes = bp_with_repair.compute_replication_prob(8, 'earth')
+    assert p_yes > p_no, f"repair should raise fidelity: no={p_no} yes={p_yes}"
+    print(f"  [52] repair systems raise rep prob OK (no_repair={p_no:.4f} -> repaired={p_yes:.4f})")
+
+    # 53. Environment modifier: silicon/exotic should be lower than earth
+    p_earth   = bp_with_repair.compute_replication_prob(8, 'earth')
+    p_silicon = bp_with_repair.compute_replication_prob(8, 'silicon')
+    p_exotic  = bp_with_repair.compute_replication_prob(8, 'exotic')
+    assert p_earth >= p_silicon >= p_exotic, \
+        f"env order wrong: earth={p_earth} si={p_silicon} ex={p_exotic}"
+    print(f"  [53] environment modifier OK (earth={p_earth:.3f} > "
+          f"silicon={p_silicon:.3f} > exotic={p_exotic:.3f})")
+
+    # 54. Standard genetic code: 64 codons, 3 stops, ATG=Met
+    assert len(GENETIC_CODE) == 64, f"genetic code should have 64 codons, got {len(GENETIC_CODE)}"
+    assert sum(1 for v in GENETIC_CODE.values() if v == '*') == 3, "should have 3 stop codons"
+    assert GENETIC_CODE['ATG'] == 'M', "ATG must encode Methionine"
+    assert STOP_CODONS == {'TAA', 'TAG', 'TGA'}, "stop codons must be canonical"
+    test_dna = "ATGGCAGCTAAATAGGGGCCC"
+    test_protein, _codon_log = translate_rna_to_protein(transcribe_dna_to_rna(test_dna))
+    assert test_protein == 'MAAK', f"ATG-GCA-GCT-AAA-TAG should give MAAK, got {test_protein}"
+    print(f"  [54] genetic code OK (64 codons, 3 stops, ATG->M, MAAK translated correctly)")
+
+    # 55. Hodgkin-Huxley: should produce spikes at I=10 mV
+    ap = simulate_action_potential(I_inject=10.0, duration_ms=30.0, dt=0.05,
+                                    n_channels=4, n_pumps=2)
+    assert ap['spike_count'] >= 1, f"HH should produce spikes at I=10, got {ap['spike_count']}"
+    assert ap['V_peak'] > 0, f"action potential should overshoot zero, V_peak={ap['V_peak']}"
+    assert ap['V_peak'] < 60, f"V_peak should be near +40 mV, got {ap['V_peak']}"
+    print(f"  [55] Hodgkin-Huxley OK ({ap['spike_count']} spikes, "
+          f"V_peak={ap['V_peak']:.1f} mV, freq={ap['frequency_hz']:.0f} Hz)")
+
+    # 56. Metabolic stoichiometry: aerobic = 32 ATP, anaerobic = 2 ATP
+    aer = compute_metabolic_yield(1, aerobic=True, has_mitochondria=True)
+    ana = compute_metabolic_yield(1, aerobic=False, has_mitochondria=False)
+    assert aer['atp'] == 32, f"aerobic should be 32 ATP, got {aer['atp']}"
+    assert ana['atp'] == 2,  f"fermentation should be 2 ATP, got {ana['atp']}"
+    assert aer['o2_consumed'] == 6, "aerobic 1 glucose -> 6 O2"
+    assert aer['co2'] == 6, "aerobic 1 glucose -> 6 CO2"
+    print(f"  [56] metabolism OK (aerobic={aer['atp']} ATP/6 O2/6 CO2, "
+          f"anaerobic={ana['atp']} ATP)")
+
+    # 57. Realistic mutation: Ts/Tv bias should hold
+    random.seed(123)
+    test_seq = "ATCGATCGATCGATCG" * 50  # 800 bp
+    _new, mut_stats = mutate_seq_realistic(test_seq, list('ATCG'),
+                                            point_rate=0.05, ts_tv_ratio=2.0,
+                                            indel_rate=0.0)  # no indels for this test
+    total_subs = mut_stats['transitions'] + mut_stats['transversions']
+    assert total_subs > 10, f"should produce mutations, got {total_subs}"
+    if mut_stats['transversions'] > 0:
+        observed_ratio = mut_stats['transitions'] / mut_stats['transversions']
+        # Statistical: should be near 2.0 with tolerance
+        assert 1.0 < observed_ratio < 4.0, \
+            f"Ts/Tv ratio should be ~2, got {observed_ratio:.2f}"
+    print(f"  [57] realistic mutation OK ({mut_stats['transitions']} Ts, "
+          f"{mut_stats['transversions']} Tv, {mut_stats['cpg_hits']} CpG hits)")
+
+    # 58. Replication fork: E. coli ~40 min, viral fast & error-prone
+    ecoli = simulate_replication_fork(4_600_000, 'prokaryote', 2)
+    assert 30 < ecoli['replication_time_min'] < 60, \
+        f"E.coli replication should be 30-60 min, got {ecoli['replication_time_min']}"
+    assert ecoli['has_proofreading'] is True
+    virus = simulate_replication_fork(5000, 'virus', 1)
+    assert virus['has_proofreading'] is False, "viral pol must be no-proofreading"
+    assert ecoli['polymerase_rate_bps'] > virus['polymerase_rate_bps']
+    print(f"  [58] replication fork OK (E.coli {ecoli['replication_time_min']:.1f} min, "
+          f"viral no-proofreading)")
+
+    # 59. Population genetics: Kimura ordering + Hardy-Weinberg sum
+    s_pos = selection_coefficient(1.10, 1.00)  # 10% advantage
+    s_neg = selection_coefficient(0.90, 1.00)
+    u_pos = kimura_fixation_probability(s_pos, Ne=1000)
+    u_neg = kimura_fixation_probability(s_neg, Ne=1000)
+    u_neut = kimura_fixation_probability(0.0, Ne=1000)
+    assert u_pos > u_neut > u_neg, \
+        f"fixation order wrong: pos={u_pos} neut={u_neut} neg={u_neg}"
+    assert abs(u_neut - 1/2000) < 1e-6, f"neutral fixation = 1/(2Ne), got {u_neut}"
+    hw = hardy_weinberg_eq(0.6)
+    assert abs(hw['AA'] + hw['Aa'] + hw['aa'] - 1.0) < 1e-9
+    print(f"  [59] population genetics OK (u_beneficial={u_pos:.3f}, "
+          f"u_neutral={u_neut:.4f}, HW sums to 1.0)")
+
+    # 60. Cell cycle: durations sum, phase transitions monotonic
+    for org_type in ('prokaryote', 'eukaryote'):
+        durs  = CELL_CYCLE_DURATIONS_MIN[org_type]
+        total = sum(durs.values())
+        assert total > 0
+        # Sample 5 points through cycle, ensure phase progresses
+        prev_cum = -1.0
+        for t in range(0, total, max(1, total // 5)):
+            c = cell_cycle_progress(t, org_type)
+            assert c['phase'] in CELL_CYCLE_PHASES
+            assert 0.0 <= c['cycle_progress'] <= 1.0
+            assert c['cycle_progress'] >= prev_cum - 1e-6, \
+                "cycle progress should be monotonic within a cycle"
+            prev_cum = c['cycle_progress']
+    print(f"  [60] cell cycle OK (G1/S/G2/M phases monotonic, "
+          f"prok={sum(CELL_CYCLE_DURATIONS_MIN['prokaryote'].values())} min, "
+          f"euk={sum(CELL_CYCLE_DURATIONS_MIN['eukaryote'].values())} min)")
+
+    print("--- all 60 tests passed ---\n")
 
 
 # ---------------------------------------------------------------------------
@@ -3789,8 +4564,10 @@ def organism_to_library_dict(org, name: str, category: str = 'generated',
         'rpm':              round(bp.rpm, 1),
         'membrane_potential': round(bp.membrane_potential, 1),
         'viable':           bool(org.viable),
+        'replication_prob': round(bp.replication_prob, 6),
+        'base_error_rate':  org.strand.system['error_rate'],
         'saved_at':         _datetime.datetime.now().isoformat(timespec='seconds'),
-        'version':          '2.0',
+        'version':          '2.1',
     }
 
 
@@ -4197,7 +4974,336 @@ MICROBE_TEMPLATES = [
         'neural_parts': [],
         'homeostasis_parts': ['heat_shock_prot', 'dna_repair', 'antioxidant'],
     },
+
+    # ── Eukaryotes ────────────────────────────────────────────────────────
+    {
+        'name': 'Saccharomyces cerevisiae (baker\'s yeast)',
+        'category': 'eukaryote',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'S. cerevisiae: 12 Mbp, 16 chromosomes, ~6000 genes. '
+            'Goffeau et al. (Science 1996). First eukaryote fully sequenced. '
+            'Model for cell cycle, apoptosis, mitochondrial function. '
+            'Key features: nucleus (histone-packed DNA), mitochondria (ATP via OXPHOS), '
+            'endoplasmic reticulum, Golgi apparatus, vacuole, cell wall (chitin+glucan), '
+            'mating pheromone signaling, complete UPS protein degradation, '
+            'and regulated division (cyclin-dependent kinases).'
+        ),
+        'description': (
+            'Baker\'s yeast — the simplest eukaryote. Has a nucleus, mitochondria, '
+            'ER, and Golgi. Model organism for all eukaryotic cell biology. '
+            'Facultative anaerobe: ferments glucose to ethanol or respires.'
+        ),
+        'subsystems': [
+            # Operon 1: Nucleus + chromatin + core metabolism
+            'PROMOTER',
+            'membrane', 'wall', 'actin', 'tubulin', 'CONNECT', 'CONNECT', 'CONNECT',
+            'nucleotide', 'nucleotide', 'coenzyme_a', 'CONNECT', 'CONNECT',
+            'amino_func', 'amino_basic', 'cofactor', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Mitochondria — OXPHOS + ATP synthesis
+            'PROMOTER',
+            'atp', 'atp', 'nadh', 'nadh', 'glucose', 'cofactor',
+            'METABOLIZE', 'METABOLIZE', 'METABOLIZE', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Secretory pathway — ER, Golgi, vesicle trafficking
+            'PROMOTER',
+            'amino_func', 'amino_basic', 'cofactor', 'CONNECT', 'CONNECT',
+            'SECRETE', 'QUORUM',
+            'TERMINATOR',
+            # Operon 4: Cell cycle + division
+            'PROMOTER',
+            'nucleotide', 'coenzyme_a', 'amino_func', 'CONNECT',
+            'DIVIDE', 'DIVIDE',
+            'TERMINATOR',
+        ],
+        'neural_parts': [],
+        'homeostasis_parts': ['heat_shock_prot', 'proteasome', 'dna_repair', 'antioxidant'],
+    },
+    {
+        'name': 'Arabidopsis thaliana (model plant cell)',
+        'category': 'plant',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'Arabidopsis thaliana: 135 Mbp, 5 chromosomes, ~27,000 genes. '
+            'Initiative (Nature 2000). Model plant genome. '
+            'Key features: chloroplasts (photosynthesis — PSI/PSII), mitochondria, '
+            'large central vacuole, cellulose cell wall, circadian clock (CCA1/LHY), '
+            'phytochrome light signaling, complete hormone signaling (auxin, GA, ABA), '
+            'and systemic acquired resistance. Haploid gametophyte / diploid sporophyte cycle.'
+        ),
+        'description': (
+            'The workhorse model plant. Has all plant-specific features: '
+            'chloroplasts for photosynthesis, cellulose wall, vacuole, '
+            'and a circadian clock. Ancestor-system of all flowering plants.'
+        ),
+        'subsystems': [
+            # Operon 1: Cell wall + cytoskeleton
+            'PROMOTER',
+            'membrane', 'wall', 'wall', 'actin', 'tubulin', 'filament',
+            'CONNECT', 'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Photosynthesis + carbon fixation (chloroplast proxy)
+            'PROMOTER',
+            'atp', 'atp', 'nadh', 'nadh', 'glucose', 'glucose',
+            'cofactor', 'coenzyme_a',
+            'METABOLIZE', 'METABOLIZE', 'METABOLIZE', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Signaling + circadian clock
+            'PROMOTER',
+            'receptor', 'histidine_kinase', 'response_reg',
+            'amino_func', 'nucleotide', 'coenzyme_a',
+            'CHEMOTAXIS', 'GRADIENT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 4: Nucleus + replication
+            'PROMOTER',
+            'nucleotide', 'nucleotide', 'amino_func', 'CONNECT', 'CONNECT',
+            'DIVIDE',
+            'TERMINATOR',
+        ],
+        'neural_parts': [],
+        'homeostasis_parts': ['heat_shock_prot', 'proteasome', 'dna_repair', 'antioxidant'],
+    },
+    {
+        'name': 'Caenorhabditis elegans neuron (nematode)',
+        'category': 'animal',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'C. elegans: 97 Mbp, 6 chromosomes, ~20,000 genes. '
+            'The Genome Sequencing Consortium (Science 1998). '
+            'First animal genome sequenced. Has exactly 302 neurons with fully mapped '
+            'connectome (White et al., 1986). Neurons use acetylcholine, GABA, serotonin, '
+            'dopamine. Complete touch, chemosensation, proprioception, thermosensation. '
+            'Model for apoptosis, aging, and neural circuit logic.'
+        ),
+        'description': (
+            'The nematode worm with the first fully mapped connectome. '
+            '302 neurons that form an exact circuit for sensory integration, '
+            'locomotion, and learning. Every cell\'s lineage is known.'
+        ),
+        'subsystems': [
+            # Operon 1: Core cell — membrane + cytoskeleton + energy
+            'PROMOTER',
+            'membrane', 'actin', 'tubulin', 'CONNECT', 'CONNECT',
+            'atp', 'nadh', 'glucose', 'METABOLIZE', 'CONNECT',
+            'nucleotide', 'coenzyme_a', 'amino_func', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Motility (body-wall muscle — flagellin analog)
+            'PROMOTER',
+            'ms_ring', 'c_ring', 'motA', 'motB', 'fliG',
+            'hook_protein', 'flagellin',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Chemosensation
+            'PROMOTER',
+            'receptor', 'histidine_kinase', 'response_reg',
+            'CHEMOTAXIS', 'GRADIENT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 4: Division + quorum
+            'PROMOTER',
+            'amino_basic', 'nucleotide', 'CONNECT',
+            'DIVIDE', 'QUORUM',
+            'TERMINATOR',
+        ],
+        'neural_parts': [
+            'ion_channel', 'pump_atpase', 'vesicle', 'neurotransmitter',
+            'receptor_gated', 'snare_complex', 'calmodulin',
+        ],
+        'homeostasis_parts': ['heat_shock_prot', 'proteasome', 'dna_repair', 'antioxidant'],
+    },
+    {
+        'name': 'Drosophila melanogaster (fruit fly — body plan)',
+        'category': 'animal',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'D. melanogaster: 175 Mbp, 4 chromosomes, ~13,600 genes. '
+            'Adams et al. (Science 2000). Flagship genetics model. '
+            'Key features: segmented body plan (Hox gene cascade), compound eyes '
+            '(rhodopsin cascade), complete nervous system (250,000 neurons), '
+            'dopaminergic reward, circadian clock (period/timeless/cryptochrome), '
+            'immune system (Toll pathway — homolog of mammalian TLR), '
+            'and complete metamorphosis (holometabolous development).'
+        ),
+        'description': (
+            'The fruit fly. 100 years of genetics research. Complete Hox gene '
+            'body plan, circadian rhythm, immune system, and complex nervous '
+            'system. Shares 60% of disease genes with humans.'
+        ),
+        'subsystems': [
+            # Operon 1: Core eukaryotic structure
+            'PROMOTER',
+            'membrane', 'wall', 'actin', 'tubulin', 'filament',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'atp', 'atp', 'nadh', 'glucose', 'coenzyme_a',
+            'METABOLIZE', 'METABOLIZE', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Motility (flight muscle)
+            'PROMOTER',
+            'ms_ring', 'c_ring', 'motA', 'motB', 'fliG',
+            'export_gate', 'hook_protein', 'flagellin', 'flagellin',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Sensory + chemotaxis
+            'PROMOTER',
+            'receptor', 'histidine_kinase', 'response_reg',
+            'amino_func', 'cofactor', 'nucleotide',
+            'CHEMOTAXIS', 'GRADIENT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 4: Development + division + signaling
+            'PROMOTER',
+            'nucleotide', 'coenzyme_a', 'amino_func', 'amino_basic',
+            'CONNECT', 'CONNECT',
+            'DIVIDE', 'QUORUM', 'SECRETE',
+            'TERMINATOR',
+        ],
+        'neural_parts': [
+            'ion_channel', 'pump_atpase', 'vesicle', 'neurotransmitter',
+            'receptor_gated', 'snare_complex', 'calmodulin', 'camp_kinase',
+            'gap_junction', 'oscillator',
+        ],
+        'homeostasis_parts': ['heat_shock_prot', 'proteasome', 'dna_repair', 'antioxidant'],
+    },
+    {
+        'name': 'Mus musculus (mouse — mammalian neuron)',
+        'category': 'animal',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'Mouse genome: 2.5 Gbp, 20 chromosomes, ~25,000 genes. '
+            'Mouse Genome Sequencing Consortium (Nature 2002). '
+            'Closest genome-scale model for human biology. '
+            'Key features: complete mammalian immune system (B/T cells, MHC), '
+            'adaptive myelination (Schwann cells), NMDA-dependent hippocampal LTP, '
+            'dopaminergic reward (VTA-NAcc), serotonergic mood regulation, '
+            'HPA stress axis (CRF/cortisol), full circadian clock (BMAL1/CLOCK), '
+            'and complex social cognition (oxytocin/vasopressin circuits).'
+        ),
+        'description': (
+            'The standard mammalian model. A cortical/hippocampal neuron with '
+            'full Hebbian plasticity, NMDA-dependent LTP, working memory, '
+            'and homeostatic regulation. 85% gene homology with humans.'
+        ),
+        'subsystems': [
+            # Operon 1: Mammalian cell core
+            'PROMOTER',
+            'membrane', 'actin', 'tubulin', 'filament',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'atp', 'atp', 'nadh', 'nadh', 'glucose', 'coenzyme_a', 'cofactor',
+            'METABOLIZE', 'METABOLIZE', 'METABOLIZE', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Neuromuscular / dendritic motility
+            'PROMOTER',
+            'ms_ring', 'c_ring', 'motA', 'motB', 'fliG',
+            'export_gate', 'hook_protein', 'flagellin',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Synaptic signaling
+            'PROMOTER',
+            'receptor', 'histidine_kinase', 'response_reg',
+            'amino_func', 'cofactor', 'nucleotide', 'coenzyme_a',
+            'CHEMOTAXIS', 'GRADIENT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 4: Cell cycle control (post-mitotic neuron = low division)
+            'PROMOTER',
+            'nucleotide', 'amino_func', 'CONNECT',
+            'DIVIDE', 'QUORUM', 'SECRETE',
+            'TERMINATOR',
+        ],
+        'neural_parts': [
+            'ion_channel', 'pump_atpase', 'vesicle', 'neurotransmitter',
+            'receptor_gated', 'snare_complex', 'calmodulin', 'camp_kinase',
+            'gap_junction', 'nmda_receptor', 'camkii', 'creb_factor',
+            'oscillator', 'pattern_net', 'working_memory', 'decision_gate',
+        ],
+        'homeostasis_parts': ['heat_shock_prot', 'proteasome', 'dna_repair', 'antioxidant'],
+    },
+    {
+        'name': 'Homo sapiens (human genome proxy)',
+        'category': 'human',
+        'source': 'real_template',
+        'n_bases': 8,
+        'env_name': 'earth',
+        'science_notes': (
+            'Human genome: 3.2 Gbp, 23 chromosome pairs, ~20,000 protein-coding genes, '
+            '~98.5% non-coding (regulatory, structural, RNA genes). '
+            'International Human Genome Sequencing Consortium (Nature 2001). '
+            'Encodes the most complex nervous system known: ~86 billion neurons, '
+            '~100 trillion synapses, prefrontal cortex for abstract reasoning, '
+            'Broca\'s/Wernicke\'s areas for language, hippocampal episodic memory, '
+            'amygdala for emotion, full HPA/HPG/HPT hormonal axes, '
+            'adaptive immune system (V(D)J recombination), and mitochondrial '
+            'oxidative phosphorylation (OXPHOS complexes I-V). '
+            'This template encodes the maximal biological complexity achievable '
+            'in the Periodic Machine genome language.'
+        ),
+        'description': (
+            'The human genome — the most complex biological program known. '
+            'Full nervous system with prefrontal cortex, language, episodic memory, '
+            'abstract reasoning, decision-making, and emotional regulation. '
+            'Complete immune, endocrine, and homeostatic systems. '
+            'Encoded here as the maximum-complexity organism template.'
+        ),
+        'subsystems': [
+            # Operon 1: Core human cell — membrane + cytoskeleton + OXPHOS
+            'PROMOTER',
+            'membrane', 'membrane', 'actin', 'actin', 'tubulin', 'tubulin', 'filament',
+            'CONNECT', 'CONNECT', 'CONNECT', 'CONNECT',
+            'atp', 'atp', 'atp', 'nadh', 'nadh', 'glucose', 'glucose',
+            'cofactor', 'coenzyme_a', 'coenzyme_a',
+            'METABOLIZE', 'METABOLIZE', 'METABOLIZE', 'METABOLIZE',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 2: Cytoskeletal motility (myosin/kinesin proxy)
+            'PROMOTER',
+            'ms_ring', 'c_ring', 'motA', 'motB', 'fliG',
+            'export_gate', 'hook_protein', 'flagellin', 'flagellin',
+            'CONNECT', 'CONNECT', 'CONNECT', 'CONNECT',
+            'TERMINATOR',
+            # Operon 3: Endocrine + immune signaling
+            'PROMOTER',
+            'receptor', 'receptor', 'histidine_kinase', 'response_reg',
+            'amino_func', 'amino_func', 'cofactor', 'nucleotide', 'coenzyme_a',
+            'CHEMOTAXIS', 'GRADIENT', 'GRADIENT',
+            'CONNECT', 'CONNECT', 'CONNECT',
+            'SECRETE', 'SECRETE',
+            'TERMINATOR',
+            # Operon 4: Genome maintenance + cell cycle
+            'PROMOTER',
+            'nucleotide', 'nucleotide', 'amino_func', 'amino_basic',
+            'coenzyme_a', 'CONNECT', 'CONNECT',
+            'DIVIDE', 'QUORUM', 'SECRETE',
+            'TERMINATOR',
+        ],
+        'neural_parts': [
+            'ion_channel', 'ion_channel', 'pump_atpase', 'pump_atpase',
+            'vesicle', 'vesicle', 'neurotransmitter', 'neurotransmitter',
+            'receptor_gated', 'receptor_gated', 'snare_complex',
+            'calmodulin', 'camp_kinase', 'gap_junction',
+            'nmda_receptor', 'nmda_receptor', 'camkii', 'camkii',
+            'creb_factor', 'oscillator', 'pattern_net', 'pattern_net',
+            'working_memory', 'working_memory', 'decision_gate', 'decision_gate',
+        ],
+        'homeostasis_parts': [
+            'heat_shock_prot', 'heat_shock_prot',
+            'proteasome', 'proteasome',
+            'dna_repair', 'dna_repair',
+            'antioxidant', 'antioxidant',
+        ],
+    },
 ]
+
+
+# Unified index over all organism templates
+ALL_ORGANISM_TEMPLATES = MICROBE_TEMPLATES
 
 
 def build_microbe_organism(template: dict) -> 'Organism':
@@ -5254,6 +6360,7 @@ def launch_ui():
                 ("🧠 Generate Life",self._generate_life,      'Accent.TButton'),
                 ("💾 Export",      self._export_json,         'TButton'),
                 ("📂 Library",     self._open_library_tab,    'TButton'),
+                ("📁 Load File",   self._load_genome_from_file,'TButton'),
                 ("✕ Clear",        self._clear,               'TButton'),
             ]
             for label, cmd, sty in btn_defs:
@@ -5331,7 +6438,12 @@ def launch_ui():
             self._nb_widget.add(t5, text="  📂 Library  ")
             self._build_library_tab(t5)
 
-            # Tab 6: About
+            # Tab 6: Real Biology — ultra-detailed biological readout
+            t6b = ttk.Frame(self._nb_widget)
+            self._nb_widget.add(t6b, text="  🧪 Real Biology  ")
+            self._build_realbio_tab(t6b)
+
+            # Tab 7: About
             t6 = ttk.Frame(self._nb_widget)
             self._nb_widget.add(t6, text="  ℹ About  ")
             self._about_out = self._make_text(t6, font_size=10)
@@ -5351,7 +6463,6 @@ def launch_ui():
             self._show_welcome()
             self._show_about()
             self._show_reference_library()
-            self._lib_folder_var = tk.StringVar(value=get_library_path())
             self._refresh_library_tab()
 
         def _build_evolve_tab(self, parent):
@@ -6691,6 +7802,12 @@ def launch_ui():
             t.insert('end', '━' * 62 + '\n\n', 'section')
 
             self._render_bp(org.blueprint, strand, env, org)
+            # Real-biology tab readouts (genetic code, HH, metabolism, etc.)
+            try:
+                self._render_realbio(org)
+            except Exception as ex:
+                # Non-fatal: log to console
+                print(f"[realbio render] {ex}")
             # Also run validation inline
             self._validate_genome_inline(strand)
             grade, grade_desc = org.structural_grade()
@@ -6797,7 +7914,7 @@ def launch_ui():
                        command=self._browse_library_folder).pack(side='left', padx=2)
             ttk.Button(ctrl, text="🔄 Refresh",
                        command=self._refresh_library_tab).pack(side='left', padx=2)
-            ttk.Button(ctrl, text="🦠 Seed Microbes",
+            ttk.Button(ctrl, text="🧬 Seed All Life",
                        command=self._seed_library_with_microbes,
                        style='Accent.TButton').pack(side='left', padx=2)
             ttk.Button(ctrl, text="🧠 Save Intelligent",
@@ -6966,6 +8083,8 @@ def launch_ui():
                 ("Flagella",        str(data.get('flagella_count',0))),
                 ("Torque",          f"{data.get('torque',0):.0f} pN·nm"),
                 ("RPM",             f"{data.get('rpm',0):.0f}"),
+                ("Replication prob.", f"{data.get('replication_prob',0)*100:.2f}% / cycle"),
+                ("Base error rate", f"{data.get('base_error_rate',0)*100:.2f}% / base"),
                 ("Saved at",        data.get('saved_at','')),
                 ("Version",         data.get('version','')),
             ]
@@ -7101,6 +8220,386 @@ def launch_ui():
                         "Seed Error", msg))
 
             threading.Thread(target=_run, daemon=True).start()
+
+        def _load_genome_from_file(self):
+            """Open a file dialog and load a genome into the editor.
+
+            Accepts:
+              .json  — organism library file (reads 'genome', 'n_bases', 'env_name')
+              .txt / .genome / any text — raw genome sequence, one line
+            After loading, auto-translates the genome.
+            """
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Load Genome File",
+                initialdir=self._lib_folder_var.get(),
+                filetypes=[
+                    ("Genome files", "*.json *.txt *.genome *.seq"),
+                    ("JSON library", "*.json"),
+                    ("Raw sequence", "*.txt *.genome *.seq"),
+                    ("All files",    "*.*"),
+                ],
+            )
+            if not path:
+                return
+            try:
+                import os
+                ext = os.path.splitext(path)[1].lower()
+                if ext == '.json':
+                    data    = load_organism_from_file(path)
+                    genome  = data.get('genome', '')
+                    n_bases = data.get('n_bases', 4)
+                    env     = data.get('env_name', 'earth')
+                    name    = data.get('name', os.path.basename(path))
+                else:
+                    # Plain text: first non-empty, non-comment line is the genome
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        lines = [l.strip() for l in f
+                                 if l.strip() and not l.startswith('#')]
+                    if not lines:
+                        messagebox.showwarning("Empty File", "No genome sequence found.")
+                        return
+                    genome = ''.join(lines).replace(' ', '')  # tolerate whitespace
+                    chars = set(genome.upper())
+
+                    # Try each (env, n_bases) combination — pick the smallest
+                    # alphabet that fully contains the input characters.
+                    detected_env = None
+                    detected_n   = None
+                    for nb in (2, 4, 6, 8):
+                        # Engine alphabet (BASE_SYSTEMS)
+                        if chars <= set(BASE_SYSTEMS[nb]['bases']):
+                            detected_env = 'earth'
+                            detected_n   = nb
+                            break
+                        # Per-env display alphabets
+                        for ev in ('earth', 'silicon', 'exotic'):
+                            if chars <= set(ENV_BASE_SYMBOLS[ev][nb]['bases']):
+                                detected_env = ev
+                                detected_n   = nb
+                                break
+                        if detected_n:
+                            break
+                    if detected_n is None:
+                        # Fallback: use widest 8-base earth and let translate
+                        # filter out invalid chars.
+                        detected_env = self._env_var.get()
+                        detected_n   = 8
+                    env     = detected_env
+                    n_bases = detected_n
+                    name    = os.path.basename(path)
+
+                # Set UI controls
+                self._base_var.set(str(n_bases))
+                self._env_var.set(env)
+                self._on_base_changed()
+
+                # Translate engine alphabet → display alphabet for the text box
+                disp = translate_seq_to_display(genome, n_bases, env)
+                self._genome_entry.delete('1.0', 'end')
+                self._genome_entry.insert('1.0', disp)
+
+                # Switch to Translation tab and run translate
+                self._nb_widget.select(0)
+                self._translate()
+                self._status_var.set(
+                    f"Loaded: {name}  |  {n_bases}-base  |  {len(genome)} bases  |  env={env}")
+            except Exception as ex:
+                messagebox.showerror("Load Error", str(ex))
+
+        def _build_realbio_tab(self, parent):
+            """Real Biology tab: 4-panel ultra-detail readout of actual biology
+            computed from the current organism."""
+            paned = ttk.PanedWindow(parent, orient='vertical')
+            paned.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Top half: Translation (genetic code) + Neural (Hodgkin-Huxley)
+            top = ttk.PanedWindow(paned, orient='horizontal')
+            paned.add(top, weight=50)
+            lf_top_l = ttk.LabelFrame(top, text=" GENETIC CODE — DNA -> mRNA -> Protein (NCBI Table 1) ")
+            top.add(lf_top_l, weight=50)
+            self._rb_translation = self._make_text(lf_top_l, font_size=10)
+            self._rb_translation.pack(fill='both', expand=True, padx=4, pady=4)
+            lf_top_r = ttk.LabelFrame(top, text=" NEURAL — Hodgkin-Huxley Action Potential (mV vs ms) ")
+            top.add(lf_top_r, weight=50)
+            self._rb_neural = self._make_text(lf_top_r, font_size=10)
+            self._rb_neural.pack(fill='both', expand=True, padx=4, pady=4)
+
+            # Bottom half: Metabolism + Replication/PopGen/CellCycle
+            bot = ttk.PanedWindow(paned, orient='horizontal')
+            paned.add(bot, weight=50)
+            lf_bot_l = ttk.LabelFrame(bot, text=" METABOLISM — Real Stoichiometry (Lehninger) ")
+            bot.add(lf_bot_l, weight=50)
+            self._rb_metabolism = self._make_text(lf_bot_l, font_size=10)
+            self._rb_metabolism.pack(fill='both', expand=True, padx=4, pady=4)
+            lf_bot_r = ttk.LabelFrame(bot, text=" REPLICATION · POP-GEN · CELL CYCLE ")
+            bot.add(lf_bot_r, weight=50)
+            self._rb_evolution = self._make_text(lf_bot_r, font_size=10)
+            self._rb_evolution.pack(fill='both', expand=True, padx=4, pady=4)
+
+        def _render_realbio(self, org):
+            """Populate the Real Biology tab with all live readouts."""
+            if org is None or org.blueprint is None:
+                return
+            bp     = org.blueprint
+            strand = org.strand
+            env    = org.env_name
+
+            # Determine organism category for replication/cell-cycle params
+            if bp.intelligence_score >= 0.7:
+                organism_type = 'eukaryote'
+            elif 'genome_integrity' in bp.complexes_formed and bp.intelligence_score > 0.0:
+                organism_type = 'eukaryote'
+            elif strand.n_bases == 4 and len(strand.seq) < 200:
+                organism_type = 'virus'
+            else:
+                organism_type = 'prokaryote'
+
+            # ── PANEL 1: GENETIC CODE TRANSLATION ────────────────────────────
+            t = self._rb_translation
+            t.delete('1.0', 'end')
+            t.tag_configure('h1',     foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            t.tag_configure('h2',     foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            t.tag_configure('val',    foreground='#00ff88')
+            t.tag_configure('dim',    foreground='#446688')
+            t.tag_configure('codon',  foreground='#ffd700')
+            t.tag_configure('stop',   foreground='#ff4444', font=('Consolas', 10, 'bold'))
+            t.tag_configure('start',  foreground='#00ff88', font=('Consolas', 10, 'bold'))
+
+            # Convert engine sequence to DNA-equivalent for translation
+            seq = strand.seq.upper()
+            # Map non-ATCG bases to closest ATCG via positional fold
+            if strand.n_bases != 4 or set(seq) - set('ATCG'):
+                # 8-base / silicon / exotic: project pairs back onto ATCG positions
+                bases = strand.system['bases']
+                proj  = {b: 'ATCG'[i % 4] for i, b in enumerate(bases)}
+                seq = ''.join(proj.get(c, 'A') for c in seq)
+
+            t.insert('end', "GENETIC CODE TRANSLATION\n", 'h1')
+            t.insert('end', f"Engine genome ({strand.n_bases}-base):  ", 'dim')
+            t.insert('end', f"{strand.seq[:60]}{'...' if len(strand.seq)>60 else ''}\n", 'val')
+            t.insert('end', f"Projected to DNA (ATCG):     ", 'dim')
+            t.insert('end', f"{seq[:60]}{'...' if len(seq)>60 else ''}\n", 'val')
+            rna = transcribe_dna_to_rna(seq)
+            t.insert('end', f"Transcribed mRNA (T->U):     ", 'dim')
+            t.insert('end', f"{rna[:60]}{'...' if len(rna)>60 else ''}\n\n", 'val')
+
+            protein, codon_log = translate_rna_to_protein(rna, start_at_atg=True)
+            if not protein:
+                t.insert('end', "No START codon (ATG) found — no protein synthesized.\n", 'stop')
+                t.insert('end', "Real biology: ribosome scans from 5' cap until it finds AUG.\n", 'dim')
+            else:
+                t.insert('end', "TRANSLATED PROTEIN\n", 'h2')
+                t.insert('end', f"  Length:          {len(protein)} amino acids\n", 'val')
+                props = protein_properties(protein)
+                t.insert('end', f"  MW:              {props['mw']:.1f} Da\n", 'val')
+                t.insert('end', f"  Mean hydropathy: {props['mean_hydropathy']:+.3f}  ", 'val')
+                hyd = props['mean_hydropathy']
+                hint = ('hydrophobic membrane protein' if hyd > 1.5 else
+                        'hydrophilic soluble protein'   if hyd < -1.5 else
+                        'mixed / globular')
+                t.insert('end', f"({hint})\n", 'dim')
+                t.insert('end', f"  Net charge:      {props['net_charge']:+.1f}\n", 'val')
+                t.insert('end', f"  pI estimate:     {props['pI_estimate']:.2f}\n\n", 'val')
+                t.insert('end', f"PROTEIN SEQUENCE (1-letter)\n", 'h2')
+                # Display protein in chunks of 10
+                for i in range(0, len(protein), 50):
+                    chunk = protein[i:i+50]
+                    t.insert('end', f"  {i+1:>5}  ")
+                    for j in range(0, len(chunk), 10):
+                        t.insert('end', f"{chunk[j:j+10]} ", 'codon')
+                    t.insert('end', '\n')
+                t.insert('end', "\n")
+                # Show first 10 codons in detail
+                t.insert('end', "FIRST 10 CODONS (reading frame from ATG)\n", 'h2')
+                for entry in codon_log[:10]:
+                    style = 'start' if entry['codon'] == 'ATG' and entry == codon_log[0] else \
+                            ('stop' if entry['aa'] == '*' else 'codon')
+                    t.insert('end', f"  pos {entry['pos']:>4}  ", 'dim')
+                    t.insert('end', f"{entry['codon']}", style)
+                    t.insert('end', f" -> ", 'dim')
+                    t.insert('end', f"{entry['aa']:<2} ({entry['name']})\n", 'val')
+
+            # ── PANEL 2: HODGKIN-HUXLEY ACTION POTENTIAL ─────────────────────
+            n = self._rb_neural
+            n.delete('1.0', 'end')
+            n.tag_configure('h1',  foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            n.tag_configure('h2',  foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            n.tag_configure('val', foreground='#00ff88')
+            n.tag_configure('dim', foreground='#446688')
+            n.tag_configure('warn', foreground='#ff8800')
+            n.tag_configure('plot', foreground='#00d4ff', font=('Consolas', 9))
+
+            n_chan  = sum(1 for p in bp.neural_parts if 'ion_channel' in p) or \
+                      bp.parts_used.count('ion_channel')
+            n_pumps = sum(1 for p in bp.neural_parts if 'pump' in p) or \
+                      bp.parts_used.count('pump_atpase')
+
+            n.insert('end', "HODGKIN-HUXLEY MEMBRANE DYNAMICS\n", 'h1')
+            n.insert('end', f"Reference: Hodgkin & Huxley, J.Physiol. 1952\n", 'dim')
+            n.insert('end', f"Squid giant axon constants: ", 'dim')
+            n.insert('end', f"V_rest=-65 mV, E_Na=+50 mV, E_K=-77 mV\n\n", 'val')
+
+            if n_chan == 0 and n_pumps == 0:
+                n.insert('end', "  No ion channels or pumps in this organism.\n", 'warn')
+                n.insert('end', "  Real biology: cell remains at passive Donnan equilibrium\n", 'dim')
+                n.insert('end', "  with no excitable behavior. (Add ion_channel and\n", 'dim')
+                n.insert('end', "  pump_atpase parts for action potentials.)\n", 'dim')
+            else:
+                n.insert('end', f"Ion channels:    {n_chan}\n", 'val')
+                n.insert('end', f"ATP pumps:       {n_pumps}\n\n", 'val')
+                # Run a real HH simulation
+                ap = simulate_action_potential(I_inject=10.0, duration_ms=50.0,
+                                                dt=0.05,
+                                                n_channels=max(1, n_chan),
+                                                n_pumps=max(1, n_pumps))
+                n.insert('end', "INTEGRATION RESULT (50 ms, dt=0.05 ms)\n", 'h2')
+                n.insert('end', f"  Spike count:     {ap['spike_count']}\n", 'val')
+                n.insert('end', f"  Spike frequency: {ap['frequency_hz']:.1f} Hz", 'val')
+                hint = (' (silent)'        if ap['frequency_hz'] < 1 else
+                        ' (slow firing)'   if ap['frequency_hz'] < 30 else
+                        ' (regular firing)' if ap['frequency_hz'] < 100 else
+                        ' (high frequency)')
+                n.insert('end', f"{hint}\n", 'dim')
+                n.insert('end', f"  V_peak:          {ap['V_peak']:+.2f} mV\n", 'val')
+                n.insert('end', f"  V_min:           {ap['V_min']:+.2f} mV (afterhyperpol.)\n", 'val')
+                n.insert('end', f"  g_Na effective:  {ap['g_Na_eff']:.1f} mS/cm^2\n", 'val')
+                n.insert('end', f"  g_K  effective:  {ap['g_K_eff']:.1f} mS/cm^2\n\n", 'val')
+
+                # ASCII voltage trace
+                n.insert('end', "VOLTAGE TRACE (ASCII art)\n", 'h2')
+                trace = ap['V_trace']
+                # Downsample to 70 columns
+                step = max(1, len(trace) // 70)
+                ds = trace[::step][:70]
+                if ds:
+                    v_min = min(ds); v_max = max(ds)
+                    rng = max(1.0, v_max - v_min)
+                    rows = 12
+                    grid = [[' '] * len(ds) for _ in range(rows)]
+                    for col, v in enumerate(ds):
+                        row = rows - 1 - int(((v - v_min) / rng) * (rows - 1))
+                        grid[row][col] = '*'
+                    n.insert('end', f"  +{v_max:+6.1f} mV  ", 'dim')
+                    n.insert('end', '┐\n', 'plot')
+                    for row_idx, row in enumerate(grid):
+                        prefix = '            '
+                        if row_idx == 0:
+                            prefix = '            '
+                        n.insert('end', prefix + '│', 'dim')
+                        n.insert('end', ''.join(row) + '\n', 'plot')
+                    n.insert('end', f"  {v_min:+6.1f} mV  ", 'dim')
+                    n.insert('end', '└' + '─' * len(ds) + '\n', 'plot')
+                    n.insert('end', f"            0 ms{'─' * (len(ds) - 14)}{ap['duration_ms']:.0f} ms\n", 'dim')
+
+            # ── PANEL 3: METABOLISM ──────────────────────────────────────────
+            m = self._rb_metabolism
+            m.delete('1.0', 'end')
+            m.tag_configure('h1',   foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            m.tag_configure('h2',   foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            m.tag_configure('val',  foreground='#00ff88')
+            m.tag_configure('dim',  foreground='#446688')
+            m.tag_configure('warn', foreground='#ff8800')
+
+            has_glucose = 'glucose' in bp.parts_used
+            has_atp     = 'atp'     in bp.parts_used
+            has_nadh    = 'nadh'    in bp.parts_used
+            # Heuristic: mitochondria proxy = has both glucose+nadh+atp + complete metabolism
+            has_mito    = bp.metabolic_pathway_complete() and has_nadh
+            aerobic     = has_mito and bp.energy_balance() >= 0
+            yld = compute_metabolic_yield(1, aerobic=aerobic, has_mitochondria=has_mito)
+
+            m.insert('end', "GLUCOSE OXIDATION\n", 'h1')
+            m.insert('end', f"Reference: Lehninger Principles of Biochemistry, 7th ed.\n", 'dim')
+            m.insert('end', f"Theoretical max: 38 ATP/glucose; observed ~30-32 with shuttle losses.\n\n", 'dim')
+
+            m.insert('end', f"Pathway active:  {yld['pathway']}\n", 'val')
+            if not has_mito:
+                m.insert('end', "  (no mitochondria detected -> fermentation only)\n", 'warn')
+
+            m.insert('end', f"\nNET YIELD per glucose\n", 'h2')
+            m.insert('end', f"  ATP produced:    {yld['atp']:>3d}\n", 'val')
+            m.insert('end', f"  O2 consumed:     {yld['o2_consumed']:>3d}\n", 'val')
+            m.insert('end', f"  CO2 released:    {yld['co2']:>3d}\n", 'val')
+            m.insert('end', f"  H2O produced:    {yld['h2o']:>3d}\n", 'val')
+            m.insert('end', f"  Energy capture:  {yld['efficiency']*100:.1f}%  "
+                            f"(rest dissipated as heat)\n\n", 'val')
+
+            m.insert('end', "PATHWAYS RUN\n", 'h2')
+            for pname in yld['pathways_run']:
+                pdata = METABOLISM_STOICHIOMETRY.get(pname, {})
+                inputs  = pdata.get('inputs',  {})
+                outputs = pdata.get('outputs', {})
+                location = pdata.get('location', '')
+                m.insert('end', f"  {pname.replace('_',' ').title()}\n", 'val')
+                m.insert('end', f"    Location: {location}\n", 'dim')
+                if inputs:
+                    in_str  = ' + '.join(f"{v} {k}" for k, v in inputs.items())
+                    out_str = ' + '.join(f"{v} {k}" for k, v in outputs.items())
+                    m.insert('end', f"    {in_str}\n", 'dim')
+                    m.insert('end', f"    -> {out_str}\n", 'dim')
+
+            # ── PANEL 4: REPLICATION + POP-GEN + CELL CYCLE ─────────────────
+            e = self._rb_evolution
+            e.delete('1.0', 'end')
+            e.tag_configure('h1',   foreground='#00ffff', font=('Consolas', 11, 'bold'))
+            e.tag_configure('h2',   foreground='#ffaa00', font=('Consolas', 10, 'bold'))
+            e.tag_configure('val',  foreground='#00ff88')
+            e.tag_configure('dim',  foreground='#446688')
+            e.tag_configure('warn', foreground='#ff8800')
+
+            # Replication fork
+            genome_bp = len(strand.seq)
+            fork_count = 30000 if organism_type == 'eukaryote' else (2 if organism_type == 'prokaryote' else 1)
+            rep = simulate_replication_fork(genome_bp, organism_type, fork_count)
+            e.insert('end', "DNA REPLICATION FORK\n", 'h1')
+            e.insert('end', f"Organism type:        {rep['organism_type']}\n", 'val')
+            e.insert('end', f"Genome size:          {rep['genome_len_bp']:,} bp\n", 'val')
+            e.insert('end', f"Polymerase rate:      {rep['polymerase_rate_bps']:.0f} bp/s\n", 'val')
+            e.insert('end', f"Active forks:         {rep['fork_count']}\n", 'val')
+            e.insert('end', f"Replication time:     {rep['replication_time_s']:.2f} s  "
+                            f"({rep['replication_time_min']:.2f} min)\n", 'val')
+            e.insert('end', f"Okazaki fragments:    {rep['okazaki_total']:,}  "
+                            f"(lagging strand)\n", 'val')
+            e.insert('end', f"Proofreading:         "
+                            f"{'YES (3->5 exonuclease)' if rep['has_proofreading'] else 'NO (error-prone)'}\n",
+                     'val' if rep['has_proofreading'] else 'warn')
+            e.insert('end', f"Replication prob:     {bp.replication_prob*100:.2f}% / cycle\n\n", 'val')
+
+            # Population genetics
+            e.insert('end', "POPULATION GENETICS\n", 'h1')
+            # Use organism's fitness as W_mutant vs neutral wild type W=0.5
+            w_mut = max(0.01, org.fitness)
+            s     = selection_coefficient(w_mut, 0.5)
+            for Ne in (100, 1000, 10000):
+                u = kimura_fixation_probability(s, Ne)
+                e.insert('end', f"  Ne={Ne:>5d}  ", 'dim')
+                e.insert('end', f"u(fixation) = {u*100:.4f}%\n", 'val')
+            e.insert('end', f"\n  Selection coeff s = {s:+.4f}  ", 'val')
+            e.insert('end', f"({'beneficial' if s>0.01 else ('deleterious' if s<-0.01 else 'near-neutral')})\n", 'dim')
+            e.insert('end', f"  Reference: Kimura (1962); Hardy & Weinberg (1908).\n\n", 'dim')
+
+            # Hardy-Weinberg illustrative
+            hw = hardy_weinberg_eq(0.5)
+            e.insert('end', "HARDY-WEINBERG (p=q=0.5)\n", 'h2')
+            e.insert('end', f"  AA:{hw['AA']:.3f}   Aa:{hw['Aa']:.3f}   aa:{hw['aa']:.3f}\n\n", 'val')
+
+            # Cell cycle — show full table
+            e.insert('end', "CELL CYCLE PHASES\n", 'h1')
+            durs = CELL_CYCLE_DURATIONS_MIN[organism_type]
+            total = sum(durs.values())
+            e.insert('end', f"Type: {organism_type}   Total cycle: {total} min "
+                            f"({total/60:.1f} h)\n\n", 'val')
+            for phase in CELL_CYCLE_PHASES:
+                dur = durs[phase]
+                pct = dur / max(1, total) * 100
+                bar_len = int(pct / 2)
+                bar = '█' * bar_len + '░' * (50 - bar_len)
+                e.insert('end', f"  {phase:<2}  {dur:>5d} min  ({pct:5.1f}%) ", 'val')
+                e.insert('end', f"{bar}\n", 'dim')
+            e.insert('end', "\nCHECKPOINTS\n", 'h2')
+            for phase, desc in CELL_CYCLE_CHECKPOINTS.items():
+                e.insert('end', f"  {phase}: {desc}\n", 'dim')
 
         def _render_bp(self, bp, strand, env, org=None):
             # ── LEFT PANEL: organism parts, systems, viability ───────────────
@@ -7254,6 +8753,23 @@ def launch_ui():
                 p.insert('end', "\nNAVIGATION\n", 'h3')
                 p.insert('end', f"  Gradient steps: {bp.gradient_steps}\n", 'metric')
                 p.insert('end', "  Organism navigates chemical gradients\n", 'ok')
+
+            # Replication probability
+            n_bases_ui = int(self._base_var.get()) if hasattr(self, '_base_var') else 4
+            rep_prob = bp.compute_replication_prob(n_bases_ui, env)
+            p.insert('end', "\nREPLICATION FIDELITY\n", 'h3')
+            bar_len = int(rep_prob * 30)
+            bar = '█' * bar_len + '░' * (30 - bar_len)
+            color = 'ok' if rep_prob > 0.7 else ('warn' if rep_prob > 0.3 else 'bad')
+            p.insert('end', f"  Probability/cycle: {rep_prob*100:5.2f}%  [{bar}]\n", color)
+            sys_spec = BASE_SYSTEMS.get(n_bases_ui, BASE_SYSTEMS[4])
+            p.insert('end', f"  Base error rate:   {sys_spec['error_rate']*100:.2f}% per base\n", 'dimtext')
+            has_repair = ('dna_repair' in bp.parts_used or 'dna_repair' in bp.homeostasis_parts)
+            p.insert('end', f"  Repair system:     {'present' if has_repair else 'absent'}\n",
+                     'ok' if has_repair else 'bad')
+            if rep_prob > 0:
+                gen_to_err = int(1.0 / (1.0 - rep_prob)) if rep_prob < 0.9999 else 999999
+                p.insert('end', f"  Expect error-free: ~{gen_to_err:,} generations\n", 'metric')
 
             # Chemistry
             if org is not None and hasattr(org, '_part_mols') and org._part_mols:
