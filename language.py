@@ -1,3 +1,11 @@
+# =============================================================================
+# NOTE: The core code in this file (lines 52–11305) has been monolithically
+# embedded into Simulation.py.  Simulation.py is now fully standalone and does
+# NOT import this module.  This file is retained as the authoritative source
+# for the Chemistry-DNA Language Engine and can still be run independently
+# via  `python language.py`  for standalone testing / development.
+# =============================================================================
+
 import subprocess, sys
 
 def _ensure(pkg, pip_names=None):
